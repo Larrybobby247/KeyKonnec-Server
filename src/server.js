@@ -3,7 +3,7 @@ const express=require('express'),mongoose=require('mongoose'),cors=require('cors
 const {z}=require('zod'),bcrypt=require('bcryptjs'),jwt=require('jsonwebtoken'),crypto=require('crypto');
 const D=require('./models'),inv=require('./inventory'),bill=require('./billing'),mail=require('./mail'),hooks=require('./hooks'),extra=require('./extra'),extra2=require('./extra2'),extra3=require('./extra3'),extra4=require('./extra4');
 const app=express(),api=express.Router(),wrap=f=>(q,s,n)=>f(q,s,n).catch(n);
-app.use(helmet());app.use(compression());app.use(cors({origin:process.env.CLIENT_URL,credentials:true}));app.use(cookie());
+app.use(helmet());app.use(compression());app.use(require('./cors'));app.use(cookie());
 // Webhook needs the raw body for signature verification.
 app.post('/api/payments/webhook',express.raw({type:'application/json'}),wrap(async(q,s)=>{
  if(!bill.validSignature(q.body,q.headers['x-paystack-signature']))return s.sendStatus(401);
