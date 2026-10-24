@@ -1,0 +1,30 @@
+{
+ "name": "keykonnec-api",
+ "version": "0.1.0",
+ "main": "src/server.js",
+ "scripts": {
+  "start": "node src/server.js",
+  "dev": "node --watch src/server.js",
+  "test": "node --test tests/",
+  "create-admin": "node scripts/createAdmin.js"
+ },
+ "dependencies": {
+  "axios": "^1.7.0",
+  "bcryptjs": "^2.4.3",
+  "compression": "^1.8.2",
+  "cookie-parser": "^1.4.6",
+  "cors": "^2.8.5",
+  "dotenv": "^16.4.5",
+  "express": "^4.19.2",
+  "express-rate-limit": "^7.4.0",
+  "helmet": "^7.1.0",
+  "jsonwebtoken": "^9.0.2",
+  "mongoose": "^8.5.0",
+  "node-cron": "^3.0.3",
+  "pdfkit": "^0.15.0",
+  "zod": "^3.23.8"
+ },
+ "devDependencies": {
+  "mongodb-memory-server": "^10.0.0"
+ }
+}
