@@ -99,12 +99,29 @@ exports.mount=({api,auth,need,admin,audit,parse,wrap})=>{
   const types=await D.RoomType.find(f).limit(100),nights=await D.Night.find({roomType:{$in:types.map(t=>t._id)},date:{$gte:from,$lt:to}}).lean(),out=[];
   for(const t of types){const used=Array(days).fill(0);nights.filter(n=>String(n.roomType)===String(t._id)).forEach(n=>{used[Math.round((n.date-from)/864e5)]=n.used});out.push({id:t.id,name:t.name,cap:await inv.capacity(t._id),used})}
   s.json({from,days,types:out,blocks:await D.Block.find({hotel:q.hotelId,to:{$gte:from},from:{$lt:to}}).limit(100).populate('roomType','name').lean()})}));
- api.post('/blocks',auth,mgr,wrap(async(q,s)=>{const b=parse(z.object({roomTypes:z.array(z.string()).min(1).max(20),qty:z.number().int().min(1).max(50).default(1),from:z.coerce.date(),to:z.coerce.date(),reason:z.string().max(200).optional()}),q.body);if(b.to<=b.from)throw bad('End date must be after start date');
+ api.post('/blocks',auth,mgr,wrap(async(q,s)=>{const b=parse(z.object({roomTypes:z.array(z.string()).min(1).max(20),qty:z.number().int().min(1).max(50).default(1),from:z.coerce.date(),to:z.coerce.date(),reason:z.string().max(200).optional(),kind:z.enum(['blocked','maintenance']).default('blocked')}),q.body);if(b.to<=b.from)throw bad('End date must be after start date');
   if(b.roomTypes.length>1&&!await feat(q,'pricing'))return deny(s,'bulk blocking');const done=[];
   try{for(const id of b.roomTypes){const t=await D.RoomType.findOne({_id:id,hotel:q.hotelId});if(!t||!can(q,t.branch))throw bad('Room type not found');await inv.reserve(t._id,b.from,b.to,b.qty);done.push(t)}}
   catch(e){for(const t of done)await inv.release(t._id,inv.nightsOf(b.from,b.to),b.qty);return e.message==='SOLD_OUT'?s.status(409).json({error:'Not enough free rooms to block for those dates.'}):Promise.reject(e)}
-  const out=[];for(const t of done)out.push(await D.Block.create({hotel:q.hotelId,branch:t.branch,roomType:t.id,qty:b.qty,from:b.from,to:b.to,reason:b.reason,createdBy:q.user.id}));await audit(q,'block.create','Block',out[0].id);s.status(201).json(out)}));
+  const out=[];for(const t of done)out.push(await D.Block.create({hotel:q.hotelId,branch:t.branch,roomType:t.id,qty:b.qty,from:b.from,to:b.to,reason:b.reason,kind:b.kind,createdBy:q.user.id}));await audit(q,'block.create','Block',out[0].id);s.status(201).json(out)}));
  api.delete('/blocks/:id',auth,mgr,wrap(async(q,s)=>{const b=await D.Block.findOneAndDelete({_id:q.params.id,hotel:q.hotelId,branch:{$in:q.user.memberships[0].branches}});if(!b)return s.sendStatus(404);await inv.release(b.roomType,inv.nightsOf(b.from,b.to),b.qty);await audit(q,'block.delete','Block',b.id);s.json({ok:true})}));
+ // One list for the booking calendar: reservations, blocked or maintenance periods, and housekeeping tasks.
+ api.get('/calendar/events',auth,wrap(async(q,s)=>{const from=new Date(q.query.from),to=new Date(q.query.to);if(isNaN(from)||isNaN(to)||to<=from||to-from>93*864e5)return s.status(400).json({error:'Choose a date range of up to three months.'});
+  const br=q.query.branch&&can(q,q.query.branch)?[q.query.branch]:mb(q),hk=await feat(q,'housekeeping');
+  const [rs,bs,ts]=await Promise.all([D.Reservation.find({hotel:q.hotelId,branch:{$in:br},status:{$nin:['cancelled','expired']},checkIn:{$lt:to},checkOut:{$gt:from}}).populate('roomType','name').populate('assignedRooms','number').select('-manageToken').limit(500).lean(),
+   D.Block.find({hotel:q.hotelId,branch:{$in:br},to:{$gt:from},from:{$lt:to}}).populate('roomType','name').limit(300).lean(),
+   hk?D.Task.find({hotel:q.hotelId,branch:{$in:br},status:{$ne:'done'}}).populate('room','number').limit(300).lean():[]]);
+  const d0=x=>{const d=new Date(x);d.setUTCHours(0,0,0,0);return d},events=[];
+  for(const r of rs)events.push({id:'res-'+r._id,kind:'reservation',refId:r._id,title:r.guest.name,roomType:r.roomType&&r.roomType.name,rooms:(r.assignedRooms||[]).map(x=>x.number),status:r.status,from:r.checkIn,to:r.checkOut,reference:r.reference,qty:r.qty,total:r.total,paid:r.paid,paymentStatus:r.paymentStatus});
+  for(const b of bs)events.push({id:'blk-'+b._id,kind:'block',blockKind:b.kind||'blocked',reason:b.reason||'',refId:b._id,title:b.reason||(b.kind==='maintenance'?'Maintenance':'Blocked'),roomType:b.roomType&&b.roomType.name,qty:b.qty,from:b.from,to:b.to,source:b.source||'manual'});
+  for(const t of ts){const f=t.from?d0(t.from):d0(t.createdAt),e=t.to?new Date(+d0(t.to)+864e5):new Date(+f+864e5);if(e>from&&f<to)events.push({id:'tsk-'+t._id,kind:'task',refId:t._id,taskType:t.type,title:(t.type==='cleaning'?'Cleaning':'Maintenance')+(t.room?' · Room '+t.room.number:''),room:t.room&&t.room.number,note:t.note,status:t.status,from:f,to:e})}
+  s.json({from,to,events})}));
+ api.patch('/blocks/:id',auth,mgr,wrap(async(q,s)=>{const b=parse(z.object({qty:z.number().int().min(1).max(50).optional(),from:z.coerce.date().optional(),to:z.coerce.date().optional(),reason:z.string().max(200).optional(),kind:z.enum(['blocked','maintenance']).optional()}),q.body);
+  const o=await D.Block.findOne({_id:q.params.id,hotel:q.hotelId,branch:{$in:mb(q)}});if(!o)return s.sendStatus(404);
+  const n={qty:b.qty===undefined?o.qty:b.qty,from:b.from||o.from,to:b.to||o.to};if(n.to<=n.from)throw bad('End date must be after start date');
+  if(+n.from!==+o.from||+n.to!==+o.to||n.qty!==o.qty){await inv.release(o.roomType,inv.nightsOf(o.from,o.to),o.qty);
+   try{await inv.reserve(o.roomType,n.from,n.to,n.qty)}catch(e){await inv.reserve(o.roomType,o.from,o.to,o.qty).catch(()=>{});return e.message==='SOLD_OUT'?s.status(409).json({error:'Not enough free rooms to block for those dates.'}):Promise.reject(e)}}
+  Object.assign(o,n);if(b.reason!==undefined)o.reason=b.reason;if(b.kind)o.kind=b.kind;await o.save();await audit(q,'block.update','Block',o.id);s.json(o)}));
  // ================= room assignment, upgrades, history =================
  const myRes=q=>D.Reservation.findOne({_id:q.params.id,hotel:q.hotelId,branch:{$in:q.user.memberships[0].branches},status:{$in:['confirmed','checked_in']}});
  api.post('/reservations/:id/assign-rooms',auth,need('owner','manager','receptionist'),gate('room_ops'),wrap(async(q,s)=>{const ids=z.array(z.string()).min(1).parse(q.body.rooms),r=await myRes(q);if(!r||ids.length>r.qty)return s.status(409).json({error:'Cannot assign rooms to this reservation'});

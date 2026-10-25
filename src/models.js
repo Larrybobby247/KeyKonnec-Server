@@ -15,7 +15,7 @@ exports.Commission=M('Commission',{hotel:id,reservation:{type:id,unique:true},pl
 exports.Audit=M('Audit',{user:id,hotel:id,action:String,entity:String,entityId:id,detail:Object});
 exports.Notification=M('Notification',{hotel:id,to:String,subject:String,channel:{type:String,default:'email'},providerId:String,status:String,error:String});
 exports.SubPayment=M('SubPayment',{hotel:id,plan:String,amount:Number,description:String,method:String,paidAt:Date,gatewayId:String,receiptNo:String,reference:{type:String,unique:true},status:{type:String,default:'pending'}},s=>s.index({hotel:1,createdAt:-1}));
-exports.Task=M('Task',{hotel:id,branch:id,room:id,type:{type:String,enum:['cleaning','maintenance']},status:{type:String,default:'open'},note:String},s=>s.index({hotel:1,status:1}));
+exports.Task=M('Task',{hotel:id,branch:id,room:id,type:{type:String,enum:['cleaning','maintenance']},status:{type:String,default:'open'},note:String,from:Date,to:Date},s=>s.index({hotel:1,status:1}));
 exports.Promo=M('Promo',{hotel:id,code:String,label:String,type:{type:String,enum:['percent','fixed']},value:Number,validFrom:Date,validTo:Date,maxUses:Number,used:{type:Number,default:0},minNights:Number,active:{type:Boolean,default:true},public:Boolean},s=>s.index({hotel:1,code:1},{unique:true}));
 exports.PriceRule=M('PriceRule',{hotel:id,roomType:id,from:Date,to:Date,price:Number,label:String},s=>s.index({hotel:1,from:1,to:1}));
 exports.Enquiry=M('Enquiry',{hotel:id,branch:id,name:String,phone:String,email:String,roomType:id,checkIn:Date,checkOut:Date,source:{type:String,enum:['whatsapp','abandoned']},status:{type:String,default:'new'},consent:Boolean,token:{type:String,unique:true,sparse:true},reservation:id,notes:String,followUps:[{at:Date,by:id,channel:String}]},s=>s.index({hotel:1,status:1}));
@@ -23,7 +23,7 @@ exports.Approval=M('Approval',{hotel:id,action:String,payload:Object,requestedBy
 exports.ApiKey=M('ApiKey',{hotel:id,name:String,prefix:String,hash:{type:String,unique:true},active:{type:Boolean,default:true},lastUsed:Date});
 exports.Webhook=M('Webhook',{hotel:id,url:String,secret:String,events:[String],active:{type:Boolean,default:true},failures:{type:Number,default:0}});
 exports.Delivery=M('Delivery',{hotel:id,webhook:id,event:String,body:String,status:String,code:Number,error:String,attempts:Number,nextAttempt:Date});
-exports.Block=M('Block',{hotel:id,branch:id,roomType:id,qty:Number,from:Date,to:Date,reason:String,createdBy:id,source:String,feed:id,uid:String},s=>s.index({hotel:1,from:1}));
+exports.Block=M('Block',{hotel:id,branch:id,roomType:id,qty:Number,from:Date,to:Date,reason:String,kind:{type:String,default:'blocked'},createdBy:id,source:String,feed:id,uid:String},s=>s.index({hotel:1,from:1}));
 exports.GuestNote=M('GuestNote',{hotel:id,email:String,notes:String,preferences:String,tags:[String]},s=>s.index({hotel:1,email:1},{unique:true}));
 exports.IcalFeed=M('IcalFeed',{hotel:id,roomType:id,name:String,url:String,lastSync:Date,lastError:String});
 exports.Feedback=M('Feedback',{hotel:id,reservation:{type:id,unique:true},rating:Number,comment:String});
