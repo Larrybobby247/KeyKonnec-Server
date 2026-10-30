@@ -46,3 +46,13 @@ test('navigation follows role and plan, and the owner always keeps Subscription'
  const free=require('../src/plans').PLANS[0][8],pro=require('../src/plans').PLANS[3][8];
  assert.ok(ids('owner',free).includes('subscription'));assert.ok(!ids('owner',free).includes('staff'));assert.ok(ids('owner',pro).includes('staff'));
  assert.ok(!ids('receptionist',pro).includes('payments')&&!ids('receptionist',pro).includes('subscription'));assert.ok(!ids('owner',[]).includes('website_edit'))});
+// ---- Paystack matching: fees passed to the customer, abandoned checkouts, re-checking flagged payments
+test('a payment where Paystack added its fee to the customer still confirms (requested_amount matches)',async()=>{const {r,ref}=await pending();
+ await bill.settle(ref,{status:'success',amount:30450,requested_amount:30000,fees:450,currency:'NGN'});const x=await D.Reservation.findById(r.id);assert.equal(x.status,'confirmed');assert.equal(x.paid,300);assert.equal((await D.Payment.findOne({reference:ref})).status,'success')});
+test('an abandoned or ongoing checkout stays open and can still succeed later',async()=>{const {r,ref}=await pending();
+ await bill.settle(ref,{status:'abandoned',amount:30000,currency:'NGN'});assert.equal((await D.Payment.findOne({reference:ref})).status,'pending');
+ await bill.settle(ref,{status:'success',amount:30000,currency:'NGN'});assert.equal((await D.Reservation.findById(r.id)).status,'confirmed')});
+test('a flagged payment records why and is fixed by a re-check',async()=>{const {r,ref}=await pending();
+ await bill.settle(ref,{status:'success',amount:12345,currency:'NGN'});const p=await D.Payment.findOne({reference:ref});assert.equal(p.status,'flagged');assert.ok(p.flagReason&&p.flagReason.includes('was expected'));assert.notEqual((await D.Reservation.findById(r.id)).status,'confirmed');
+ await bill.settle(ref,{status:'success',amount:30000,currency:'NGN'});assert.equal((await D.Payment.findOne({reference:ref})).status,'success');assert.equal((await D.Reservation.findById(r.id)).status,'confirmed')});
+test('a genuinely failed payment is marked failed',async()=>{const {ref}=await pending();await bill.settle(ref,{status:'failed',amount:30000,currency:'NGN'});assert.equal((await D.Payment.findOne({reference:ref})).status,'failed')});
