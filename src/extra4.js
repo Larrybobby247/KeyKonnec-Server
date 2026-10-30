@@ -1,4 +1,4 @@
-const D=require('./models'),bill=require('./billing'),mail=require('./mail'),pdf=require('./pdf'),plans=require('./plans');
+const D=require('./models'),inv=require('./inventory'),bill=require('./billing'),mail=require('./mail'),pdf=require('./pdf'),plans=require('./plans');
 const {z}=require('zod'),axios=require('axios'),crypto=require('crypto'),rate=require('express-rate-limit'),mongoose=require('mongoose');
 const day=x=>new Date(x).toISOString().slice(0,10),hex=n=>crypto.randomBytes(n).toString('hex'),bad=m=>Object.assign(new Error(m),{status:400}),OID=x=>new mongoose.Types.ObjectId(String(x)),esc=s=>String(s).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
 // ---------- one source of truth for what each role and plan can see (sidebar AND API guards) ----------
@@ -56,7 +56,17 @@ exports.mount=({api,auth,need,admin,audit,parse,wrap})=>{
   Object.assign(t,b);await t.save();await audit(q,'roomtype.update','RoomType',t.id,{fields:Object.keys(b)});s.json(t)}));
  api.patch('/rooms/:id',auth,allow('rooms'),wrap(async(q,s)=>{let b=parse(z.object({status:z.enum(['vacant','occupied','cleaning','maintenance','out_of_service']),housekeeping:z.enum(['clean','dirty','inspection']),maintenanceNote:z.string().max(300),active:z.boolean(),number:z.string().min(1).max(10)}).partial(),q.body);
   if(q.role==='receptionist')b={status:b.status,housekeeping:b.housekeeping};Object.keys(b).forEach(k=>b[k]===undefined&&delete b[k]);
-  const r=await D.Room.findOneAndUpdate({_id:q.params.id,hotel:q.hotelId,branch:{$in:q.user.memberships[0].branches}},{$set:b},{new:true});if(!r)return s.sendStatus(404);await audit(q,'room.status','Room',r.id,b);s.json(r)}));
+  if(b.number!==undefined)b.number=b.number.trim();if(b.number===''||(b.number!==undefined&&q.role==='receptionist'))delete b.number;
+  let r;try{r=await D.Room.findOneAndUpdate({_id:q.params.id,hotel:q.hotelId,branch:{$in:q.user.memberships[0].branches}},{$set:b},{new:true})}catch(e){if(e.code===11000)return s.status(409).json({error:`Another room already uses the number ${b.number}.`});throw e}
+  if(!r)return s.sendStatus(404);await audit(q,'room.update','Room',r.id,b);s.json(r)}));
+ // Delete one physical room. Refused while it would leave future bookings without a room, so the room type can never be oversold.
+ api.delete('/rooms/:id',auth,allow('rooms'),mgr,wrap(async(q,s)=>{const r=await D.Room.findOne({_id:q.params.id,hotel:q.hotelId,branch:{$in:q.user.memberships[0].branches}});if(!r)return s.sendStatus(404);
+  const now=new Date(),today=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate()));
+  if(await D.Reservation.exists({assignedRooms:r._id,status:{$in:['confirmed','checked_in']},checkOut:{$gt:today}}))return s.status(409).json({error:`Room ${r.number} is assigned to a current or upcoming reservation. Reassign or cancel that reservation first.`});
+  if(r.status==='occupied')return s.status(409).json({error:`Room ${r.number} is marked occupied. Set it to vacant before deleting it.`});
+  if(r.active&&!['maintenance','out_of_service'].includes(r.status)){const cap=await inv.capacity(r.roomType),[x]=await D.Night.aggregate([{$match:{roomType:r.roomType,date:{$gte:today}}},{$group:{_id:null,max:{$max:'$used'}}}]);
+   if(x&&x.max>cap-1)return s.status(409).json({error:`Deleting room ${r.number} would leave ${x.max} room${x.max>1?'s':''} booked on some upcoming nights but only ${cap-1} in this type. Cancel or move those bookings first, or hide the room type instead.`})}
+  await D.Room.deleteOne({_id:r._id});await D.Task.deleteMany({room:r._id});await audit(q,'room.delete','Room',r.id,{number:r.number});s.json({ok:true,number:r.number})}));
  // ===== website: draft, preview, publish =====
  const cl=z.string().url().startsWith('https://res.cloudinary.com/'),st=n=>z.string().max(n);
  const C=z.object({hero:z.object({title:st(120),subtitle:st(300),image:cl.or(z.literal(''))}).partial(),about:z.object({title:st(120),body:st(4000),image:cl.or(z.literal(''))}).partial(),amenities:z.array(st(60)).max(30),reviews:z.array(z.object({name:st(60),rating:z.number().int().min(1).max(5),text:st(500)})).max(12),
@@ -69,7 +79,10 @@ exports.mount=({api,auth,need,admin,audit,parse,wrap})=>{
  api.post('/website/publish',auth,W,mgr,wrap(async(q,s)=>{const h=await D.Hotel.findById(q.hotelId);if(!await D.RoomType.exists({hotel:h.id,active:true}))return s.status(409).json({error:'Add at least one active room type before publishing your website.'});
   await D.Hotel.updateOne({_id:h.id},{$set:{'website.status':'publishing'}});await D.Hotel.updateOne({_id:h.id},{$set:{'website.status':'published','website.published':(h.website&&h.website.draft)||{},'website.publishedAt':new Date()}});await audit(q,'website.publish','Hotel',h.id);s.json({status:'published',url:publicUrl(h,q).url,urlKind:publicUrl(h,q).kind,path:'/h/'+h.slug})}));
  api.post('/website/unpublish',auth,W,mgr,wrap(async(q,s)=>{await D.Hotel.updateOne({_id:q.hotelId},{$set:{'website.status':'unpublished'}});await audit(q,'website.unpublish','Hotel',q.hotelId);s.json({status:'unpublished'})}));
- api.get('/notifications',auth,wrap(async(q,s)=>s.json(await D.Notification.find({hotel:q.hotelId}).sort({createdAt:-1}).limit(100).select('channel subject status to createdAt error').lean())));
+ api.get('/notifications',auth,wrap(async(q,s)=>s.json(await D.Notification.find({hotel:q.hotelId}).sort({createdAt:-1}).limit(100).select('channel subject status to createdAt error kind title body link read').lean())));
+ // In-app activity (new bookings, balance payments) shown on the dashboard bell. Cheap to poll.
+ api.get('/notifications/summary',auth,wrap(async(q,s)=>{const f={hotel:q.hotelId,channel:'inapp'};const [unread,latest]=await Promise.all([D.Notification.countDocuments({...f,read:false}),D.Notification.find(f).sort({createdAt:-1}).limit(8).select('kind title body link read createdAt').lean()]);s.json({unread,latest})}));
+ api.post('/notifications/read',auth,wrap(async(q,s)=>{const ids=Array.isArray(q.body.ids)?q.body.ids.filter(x=>/^[a-f0-9]{24}$/i.test(String(x))):null;await D.Notification.updateMany({hotel:q.hotelId,channel:'inapp',read:false,...(ids&&ids.length?{_id:{$in:ids}}:{})},{read:true});s.json({ok:true})}));
  // ===== subscription & transactions =====
  const own1=need('owner'),checkout=async(q,key)=>{const pl=await D.Plan.findOne({key,active:true});if(!pl||!pl.price)throw bad('Choose a paid plan');const ref='SUB-'+hex(8);
   await D.SubPayment.create({hotel:q.hotelId,plan:pl.key,amount:pl.price,reference:ref,description:`${pl.name} plan, ${pl.interval||'monthly'} subscription`});return(await bill.initialize(q.user.email,pl.price,ref,`${process.env.CLIENT_URL}/billing/return?reference=${ref}`)).authorization_url};

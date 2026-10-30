@@ -17,19 +17,30 @@ exports.validSignature=(raw,sig)=>!!sig&&crypto.createHmac('sha512',process.env.
 const EMEMO=new Map();exports.invalidate=h=>h?EMEMO.delete(String(h)):EMEMO.clear();
 exports.entitlements=async hotel=>{const k=String(hotel),c=EMEMO.get(k);if(c&&Date.now()-c.t<5000)return c.v;
  const s=await Subscription.findOne({hotel}).lean(),key=s.status==='trialing'&&s.trialEnd<new Date()?'free':s.plan,v={sub:s,plan:await Plan.findOne({key}).lean()};EMEMO.set(k,{t:Date.now(),v});if(EMEMO.size>2000)EMEMO.clear();return v};
-// Idempotent: only one caller can move pending->processing, so duplicate webhooks do nothing.
-exports.settle=async(ref,d)=>{const p=await Payment.findOneAndUpdate({reference:ref,status:'pending'},{status:'processing'});if(!p)return;
- if(d.status!=='success'){await Payment.updateOne({_id:p._id},{status:'failed'});return}
- if(d.amount!==Math.round(p.amount*100)||d.currency!==p.currency){await Payment.updateOne({_id:p._id},{status:'flagged'});return}
+// Does what Paystack says was paid match what we asked for? Paystack's `amount` is what the customer was charged: when the Paystack account
+// passes its fees on to the customer, that figure includes the fee, so the amount we originally asked for (`requested_amount`) is checked too.
+exports.amountMatches=(d,expected)=>{const want=Math.round(expected*100),amount=Number(d.amount),asked=d.requested_amount==null?NaN:Number(d.requested_amount),fees=Number(d.fees)||0;
+ return amount===want||asked===want||(fees>0&&amount-fees===want)};
+exports.currencyMatches=(d,cur)=>String(d.currency||'NGN').toUpperCase()===String(cur||'NGN').toUpperCase();
+exports.mismatchReason=(d,expected,cur)=>{const f=n=>(Number(n)/100).toLocaleString('en-NG');return `Paystack reported ${f(d.amount)} ${d.currency||''}${d.requested_amount!=null?` (requested ${f(d.requested_amount)})`:''}, but ${Number(expected).toLocaleString('en-NG')} ${cur||'NGN'} was expected.`};
+// Only a result Paystack calls "failed" or "reversed" is a failure. "abandoned", "ongoing" or "pending" just means the customer has not finished paying yet, so the payment stays open and can still succeed later.
+exports.isFailure=d=>['failed','reversed'].includes(String(d.status));
+// Idempotent: only one caller can move pending->processing, so duplicate webhooks do nothing. Flagged and failed payments can be re-checked (a customer may retry on the same reference).
+exports.settle=async(ref,d)=>{const p=await Payment.findOneAndUpdate({reference:ref,status:{$in:['pending','flagged','failed']}},{status:'processing'});if(!p)return;
+ try{await settleOne(p,d)}catch(e){await Payment.updateOne({_id:p._id,status:'processing'},{status:p.status});throw e}};
+async function settleOne(p,d){
+ if(d.status!=='success'){await Payment.updateOne({_id:p._id},{status:exports.isFailure(d)?'failed':p.status==='failed'?'failed':'pending'});return}
+ if(!exports.amountMatches(d,p.amount)||!exports.currencyMatches(d,p.currency)){await Payment.updateOne({_id:p._id},{status:'flagged',flagReason:exports.mismatchReason(d,p.amount,p.currency)});return}
  const r=await Reservation.findById(p.reservation);
- if(p.kind==='balance'){const paid=r.paid+p.amount;await Reservation.updateOne({_id:r._id},{paid,paymentStatus:paid>=r.total?'paid':'partial'});await Payment.updateOne({_id:p._id},{status:'success',verified:true});await recordCommission(r,p);hooks.emit(r.hotel,'payment.succeeded',{reservation:r.reference,amount:p.amount});return}
- const h=await Hold.findOne({_id:{$exists:true},reservation:r._id});
- if(h.status!=='active'){try{await inv.reserve(r.roomType,r.checkIn,r.checkOut,r.qty)}catch{await Payment.updateOne({_id:p._id},{status:'needs_refund'});return}}
+ if(p.kind==='balance'){const paid=r.paid+p.amount;await Reservation.updateOne({_id:r._id},{paid,paymentStatus:paid>=r.total?'paid':'partial'});await Payment.updateOne({_id:p._id},{status:'success',verified:true,flagReason:null});await recordCommission(r,p);hooks.emit(r.hotel,'payment.succeeded',{reservation:r.reference,amount:p.amount});require('./alerts').balancePaid(r,p,paid);return}
+ let h=await Hold.findOne({reservation:r._id});
+ if(!h||h.status!=='active'){try{await inv.reserve(r.roomType,r.checkIn,r.checkOut,r.qty)}catch{await Payment.updateOne({_id:p._id},{status:'needs_refund'});return}
+  if(!h)h=await Hold.create({hotel:r.hotel,branch:r.branch,roomType:r.roomType,checkIn:r.checkIn,checkOut:r.checkOut,qty:r.qty,expiresAt:new Date('2999-01-01'),status:'converted',reservation:r._id})}
  await Hold.updateOne({_id:h._id},{status:'converted'});
- await Payment.updateOne({_id:p._id},{status:'success',verified:true});await recordCommission(r,p);
+ await Payment.updateOne({_id:p._id},{status:'success',verified:true,flagReason:null});await recordCommission(r,p);
  const paid=r.paid+p.amount;await Reservation.updateOne({_id:r._id},{paid,status:'confirmed',paymentStatus:paid>=r.total?'paid':'partial'});
- try{const hh=await Hotel.findById(r.hotel),day=x=>x.toISOString().slice(0,10);
-  mail.send(r.guest.email,'Booking confirmed '+r.reference,mail.tpl('Your booking is confirmed',['Reference: '+r.reference,hh.name+(hh.address?', '+hh.address:''),`Check-in ${day(r.checkIn)}, check-out ${day(r.checkOut)}`,`Paid ${p.amount} ${p.currency}`,...(paid<r.total?[`Balance of ${r.total-paid} is due ${r.balanceDue?day(r.balanceDue):'at arrival'}.`]:[])]),r.hotel);
-  const o=await User.findOne({'memberships.hotel':r.hotel,'memberships.role':'owner'});notify.guest(r,'confirm',[r.guest.name,hh.name,r.reference,day(r.checkIn),day(r.checkOut)]);hooks.emit(r.hotel,'payment.succeeded',{reservation:r.reference,amount:p.amount});hooks.emit(r.hotel,'reservation.confirmed',{reference:r.reference});o&&mail.send(o.email,'New paid booking '+r.reference,mail.tpl('New paid booking',[`${r.guest.name}, ${day(r.checkIn)}`]),r.hotel)}catch{}};
+ try{const fresh=await Reservation.findById(r._id);hooks.emit(r.hotel,'payment.succeeded',{reservation:r.reference,amount:p.amount});hooks.emit(r.hotel,'reservation.confirmed',{reference:r.reference});
+  notify.guest(r,'confirm',[r.guest.name,(await Hotel.findById(r.hotel)).name,r.reference,r.checkIn.toISOString().slice(0,10),r.checkOut.toISOString().slice(0,10)]);
+  await require('./alerts').bookingPaid(fresh,p)}catch(e){console.error('booking alerts:',e.message)}}
 exports.commissionFor=async r=>{if(!r.commissionRate||r.source!=='online'||r.status!=='checked_out')return;
  const base=Math.min(r.accommodation,r.paid);await Commission.updateOne({reservation:r._id},{$setOnInsert:{hotel:r.hotel,rate:r.commissionRate,base,amount:+(base*r.commissionRate).toFixed(2)}},{upsert:true})};

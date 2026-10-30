@@ -1,22 +1,28 @@
-const notify=require('./notify'),pricing=require('./pricing'),D=require('./models'),inv=require('./inventory'),bill=require('./billing'),mail=require('./mail');
+const notify=require('./notify'),pricing=require('./pricing'),D=require('./models'),inv=require('./inventory'),bill=require('./billing'),mail=require('./mail'),E=require('./emails'),alerts=require('./alerts');
 const {z}=require('zod'),bcrypt=require('bcryptjs'),crypto=require('crypto'),mongoose=require('mongoose'),cron=require('node-cron'),rate=require('express-rate-limit');
 const OID=x=>new mongoose.Types.ObjectId(String(x)),day=x=>new Date(x).toISOString().slice(0,10);
 const ownerOf=h=>D.User.findOne({'memberships.hotel':h,'memberships.role':'owner'});
 const tellOwner=async(h,subject,lines)=>{const u=await ownerOf(h);u&&mail.send(u.email,subject,mail.tpl(subject,lines),h)};
 async function sendReset(u){const t=crypto.randomBytes(24).toString('hex');u.resetHash=crypto.createHash('sha256').update(t).digest('hex');u.resetExp=new Date(Date.now()+36e5);await u.save();
- mail.send(u.email,'Set your keykonnec password',mail.tpl('Set your password',['Use this link within one hour:',`${process.env.CLIENT_URL}/reset?token=${t}`]))}
+ mail.send(u.email,'Set your keykonnec password',mail.tpl('Set your password',[`Hi ${String(u.name||'there').split(' ')[0]},`,'We received a request to set or reset the password for your keykonnec account. The link below works for one hour.',{button:['Set my password',`${process.env.CLIENT_URL}/reset?token=${t}`]},{note:'If you did not ask for this, you can ignore this email. Your password will not change.'}],{badge:['Account security','blue']}))}
 const payStatus=r=>r.paid>=r.total?'paid':r.paid>0?'partial':'unpaid';
-// Subscription payment: activates only after verified success with the exact plan price.
-async function settleSub(ref,d){const sp=await D.SubPayment.findOneAndUpdate({reference:ref,status:'pending'},{status:'processing'});if(!sp)return;
- if(d.status!=='success'||d.amount!==Math.round(sp.amount*100)||d.currency!=='NGN'){await D.SubPayment.updateOne({_id:sp._id},{status:d.status==='success'?'flagged':'failed'});tellOwner(sp.hotel,'Subscription payment failed',['Your plan was not changed. Try again from Settings.']);return}
- const pl=await D.Plan.findOne({key:sp.plan}),now=new Date(),end=new Date(+now+({monthly:30,quarterly:90,yearly:365})[pl.interval||'monthly']*864e5);
+// Subscription payment: activates only after verified success with the exact plan price. Flagged and failed payments can be re-checked.
+async function settleSub(ref,d){const sp=await D.SubPayment.findOneAndUpdate({reference:ref,status:{$in:['pending','flagged','failed']}},{status:'processing'});if(!sp)return;
+ try{await settleSubOne(sp,d)}catch(e){await D.SubPayment.updateOne({_id:sp._id,status:'processing'},{status:sp.status});throw e}}
+async function settleSubOne(sp,d){const ml=(t,l,o)=>D.User.findOne({'memberships.hotel':sp.hotel,'memberships.role':'owner'}).then(u=>u&&mail.send(u.email,t,mail.tpl(t,l,o),sp.hotel));
+ if(d.status!=='success'){const failed=bill.isFailure(d)||sp.status==='failed';await D.SubPayment.updateOne({_id:sp._id},{status:failed?'failed':'pending'});
+  if(bill.isFailure(d)&&sp.status!=='failed')ml('Subscription payment failed',['Your subscription payment did not go through, so your plan was not changed.',['Reference',sp.reference],['Amount',E.money(sp.amount)],{button:['Try again',process.env.CLIENT_URL+'/dashboard/subscription']}],{badge:['Payment failed','red']});return}
+ if(!bill.amountMatches(d,sp.amount)||!bill.currencyMatches(d,'NGN')){await D.SubPayment.updateOne({_id:sp._id},{status:'flagged',flagReason:bill.mismatchReason(d,sp.amount,'NGN')});
+  ml('We are checking your subscription payment',['Paystack received a payment, but the amount did not match the plan price, so we have not changed your plan yet.',['Reference',sp.reference],['Expected',E.money(sp.amount)],{note:'Open Subscription & Transactions and press Re-check. If it still does not clear, contact keykonnec support with this reference.'}],{badge:['Under review','amber']});return}
+ const pl=await D.Plan.findOne({key:sp.plan}),now=new Date(),end=new Date(+now+({monthly:30,quarterly:90,yearly:365})[pl.interval||'monthly']*864e5),receiptNo='KKR-'+sp.reference.slice(4,12).toUpperCase();
  await D.Subscription.updateOne({hotel:sp.hotel},{$set:{plan:sp.plan,status:'active',periodEnd:end,commissionRate:pl.commissionRate,reminders:[],pendingPlan:null,cancelRequestedAt:null},$push:{history:{plan:sp.plan,rate:pl.commissionRate,at:now}}});
- await D.SubPayment.updateOne({_id:sp._id},{status:'success',method:d.channel,paidAt:d.paid_at?new Date(d.paid_at):now,gatewayId:String(d.id||''),receiptNo:'KKR-'+sp.reference.slice(4,12).toUpperCase()});bill.invalidate(sp.hotel);tellOwner(sp.hotel,'Subscription active',[`Your ${pl.name} plan is active until ${day(end)}.`])}
+ await D.SubPayment.updateOne({_id:sp._id},{status:'success',flagReason:null,method:d.channel,paidAt:d.paid_at?new Date(d.paid_at):now,gatewayId:String(d.id||''),receiptNo});bill.invalidate(sp.hotel);
+ ml('Subscription active',[`Thank you. Your ${pl.name} plan is now active and every feature on it is unlocked.`,{heading:'Payment details'},['Plan',pl.name],['Amount paid',E.money(sp.amount),'strong'],['Receipt number',receiptNo],['Reference',sp.reference],['Active until',E.D(end)],['Commission rate',((pl.commissionRate||0)*100).toFixed(1).replace('.0','')+'%'],{button:['Go to your dashboard',process.env.CLIENT_URL+'/dashboard/subscription']},{note:'You will get a reminder before the plan ends. If it is not renewed you move to the Free plan and keep all your data.'}],{badge:['Payment successful','green']})}
 async function applyRefund(p,amt){await D.Payment.updateOne({_id:p._id},{$inc:{refundedAmount:amt}});
  if(p.status!=='success')return;const r=await D.Reservation.findById(p.reservation);if(!r)return;r.paid=Math.max(0,r.paid-amt);r.paymentStatus=payStatus(r);await r.save();
  await D.Commission.updateOne({reservation:r.id},{$push:{adjustments:{amount:-+(amt*(r.commissionRate||0)).toFixed(2),reason:'refund',at:new Date()}}})}
 async function sendVerify(u){const t=crypto.randomBytes(24).toString('hex');u.verifyHash=crypto.createHash('sha256').update(t).digest('hex');u.verifyExp=new Date(Date.now()+2*864e5);await u.save();
- mail.send(u.email,'Verify your keykonnec email',mail.tpl('Verify your email',['Confirm your email to finish setting up your account:',`${process.env.CLIENT_URL}/verify?token=${t}`]))}
+ mail.send(u.email,'Verify your keykonnec email',mail.tpl('Verify your email',[`Hi ${String(u.name||'there').split(' ')[0]},`,'Confirm your email address to finish setting up your keykonnec account. The link works for 48 hours.',{button:['Verify my email',`${process.env.CLIENT_URL}/verify?token=${t}`]},{note:'If you did not create a keykonnec account, you can ignore this email.'}],{badge:['One last step','amber']}))}
 // Starter and Growth can start a free trial (length set per plan by the admin); everyone else starts on Free.
 exports.initialSub=async(hotel,key)=>{const now=new Date(),f=await D.Plan.findOne({key:'free'}),pl=key&&key!=='free'?await D.Plan.findOne({key,active:true,trialDays:{$gt:0}}):null;
  if(pl)return D.Subscription.create({hotel,plan:pl.key,status:'trialing',trialUsed:true,trialStart:now,trialEnd:new Date(+now+pl.trialDays*864e5),commissionRate:0,history:[{plan:pl.key,rate:0,at:now}]});
@@ -25,7 +31,7 @@ exports.initialSub=async(hotel,key)=>{const now=new Date(),f=await D.Plan.findOn
 exports.applyRefund=applyRefund;exports.sendVerify=sendVerify;
 exports.webhook=async e=>{const d=e.data||{};
  if(e.event==='charge.success')return String(d.reference).startsWith('SUB-')?settleSub(d.reference,d):bill.settle(d.reference,d);
- if(e.event==='refund.processed'){const p=await D.Payment.findOneAndUpdate({reference:d.transaction_reference,refundStatus:'pending'},{refundStatus:'refunded'});if(p){await applyRefund(p,d.amount/100);const r=await D.Reservation.findById(p.reservation);r&&r.guest.email&&mail.send(r.guest.email,'Refund processed '+r.reference,mail.tpl('Your refund was processed',['Amount: '+d.amount/100,'It can take a few days to reach your account.']),r.hotel)}}
+ if(e.event==='refund.processed'){const p=await D.Payment.findOneAndUpdate({reference:d.transaction_reference,refundStatus:'pending'},{refundStatus:'refunded'});if(p){await applyRefund(p,d.amount/100);const r=await D.Reservation.findById(p.reservation);if(r&&r.guest.email){const m=E.guestRefund({hotel:await D.Hotel.findById(r.hotel).lean(),r,amount:d.amount/100});mail.send(r.guest.email,m.subject,m.html,r.hotel)}}}
  if(e.event==='refund.failed')await D.Payment.updateOne({reference:d.transaction_reference,refundStatus:'pending'},{refundStatus:'failed'})};
 exports.mount=({api,auth,need,admin,audit,parse,wrap})=>{
  const mb=q=>q.user.memberships[0].branches.map(String),can=(q,b)=>mb(q).includes(String(b)),feat=async(q,f)=>(await bill.entitlements(q.hotelId)).plan.features.includes(f);
@@ -66,10 +72,15 @@ exports.mount=({api,auth,need,admin,audit,parse,wrap})=>{
   if(pay){const amt=pay.mode==='full'?r.total:Math.min(pay.amount,r.total);if(amt>0){const p=await D.Payment.create({hotel:r.hotel,branch:r.branch,reservation:r.id,amount:amt,currency:r.currency,source:'manual_external',method:pay.method,note:pay.note,reference:'MAN-'+crypto.randomBytes(5).toString('hex'),status:'success',verified:true,recordedBy:q.user.id});r.paid=amt;r.paymentStatus=r.paid>=r.total?'paid':'partial';await r.save();await audit(q,'payment.manual','Payment',p.id,{amount:amt})}}
   s.status(201).json(r)}));
  api.post('/reservations/:id/confirm',auth,wrap(async(q,s)=>{const r=await D.Reservation.findOneAndUpdate({_id:q.params.id,hotel:q.hotelId,branch:{$in:q.user.memberships[0].branches},status:'requested'},{status:'confirmed'},{new:true});if(!r)return s.status(409).json({error:'Only booking requests can be confirmed'});
-  await audit(q,'reservation.confirm','Reservation',r.id);r.guest.email&&mail.send(r.guest.email,'Booking confirmed '+r.reference,mail.tpl('Your booking is confirmed',['Reference: '+r.reference,`Check-in ${day(r.checkIn)}, check-out ${day(r.checkOut)}`]),r.hotel);s.json(r)}));
+  await audit(q,'reservation.confirm','Reservation',r.id);if(r.guest.email){const [h,t]=await Promise.all([D.Hotel.findById(r.hotel).lean(),D.RoomType.findById(r.roomType).lean()]),m=E.guestApproved({hotel:h,r,type:t});mail.send(r.guest.email,m.subject,m.html,r.hotel)}s.json(r)}));
  // ---- payments, refunds
  const fin=need('owner','manager','accountant');
  api.get('/payments',auth,fin,wrap(async(q,s)=>{const p=Math.max(1,+q.query.page||1),f={hotel:q.hotelId};s.json({items:await D.Payment.find(f).sort({createdAt:-1}).skip((p-1)*30).limit(30).populate('reservation','reference guest.name').lean(),total:await D.Payment.countDocuments(f)})}));
+ api.post('/payments/:id/recheck',auth,fin,wrap(async(q,s)=>{const p=await D.Payment.findOne({_id:q.params.id,hotel:q.hotelId,source:'platform'});if(!p)return s.sendStatus(404);
+  if(p.status==='processing'&&Date.now()-new Date(p.updatedAt)>5*60000)await D.Payment.updateOne({_id:p._id,status:'processing'},{status:'pending'});
+  if(!['pending','flagged','failed','processing'].includes(p.status))return s.status(409).json({error:'This payment does not need re-checking.'});
+  let d;try{d=await bill.verify(p.reference)}catch(e){return s.status(502).json({error:e.response&&e.response.status===404?'Paystack has no record of this payment yet. The guest may not have paid.':'Paystack could not be reached. Try again shortly.'})}
+  await bill.settle(p.reference,d);const x=await D.Payment.findById(p._id);s.json({status:x.status,flagReason:x.flagReason||null})}));
  api.post('/payments/:id/verify',auth,fin,wrap(async(q,s)=>{const p=await D.Payment.findOneAndUpdate({_id:q.params.id,hotel:q.hotelId,source:'manual_external',verified:false,status:'success'},{verified:true});if(!p)return s.status(409).json({error:'Nothing to verify'});
   const r=await D.Reservation.findById(p.reservation);r.paid+=p.amount;r.paymentStatus=payStatus(r);await r.save();await audit(q,'payment.verify','Payment',p.id);s.json({ok:true})}));
  
@@ -124,7 +135,7 @@ exports.mount=({api,auth,need,admin,audit,parse,wrap})=>{
   const ref='SUB-'+crypto.randomBytes(8).toString('hex');await D.SubPayment.create({hotel:q.hotelId,plan:pl.key,amount:pl.price,reference:ref});
   const init=await bill.initialize(q.user.email,pl.price,ref,`${process.env.CLIENT_URL}/billing/return?reference=${ref}`);s.json({checkoutUrl:init.authorization_url})}));
  api.get('/subscriptions/verify/:ref',auth,need('owner'),wrap(async(q,s)=>{const sp=await D.SubPayment.findOne({reference:q.params.ref,hotel:q.hotelId});if(!sp)return s.sendStatus(404);
-  if(sp.status==='pending')await settleSub(sp.reference,await bill.verify(sp.reference));s.json(await D.SubPayment.findById(sp.id))}));// never trust the browser redirect: verify with Paystack
+  if(['pending','flagged','failed'].includes(sp.status)){let d;try{d=await bill.verify(sp.reference)}catch{d=null}if(d)await settleSub(sp.reference,d)}s.json(await D.SubPayment.findById(sp.id))}));// never trust the browser redirect: verify with Paystack
  // ---- platform admin
  api.get('/admin/overview',...admin,wrap(async(q,s)=>{const [hotels,subs,rev,com,res,bad]=await Promise.all([D.Hotel.countDocuments(),D.Subscription.aggregate([{$group:{_id:{plan:'$plan',status:'$status'},n:{$sum:1}}}]),D.SubPayment.aggregate([{$match:{status:'success'}},{$group:{_id:null,t:{$sum:'$amount'}}}]),D.Commission.aggregate([{$group:{_id:'$status',t:{$sum:'$amount'}}}]),D.Reservation.countDocuments(),D.Payment.countDocuments({status:{$in:['failed','flagged','needs_refund']}})]);
   s.json({hotels,subs,subscriptionRevenue:rev[0]?.t||0,commission:com,reservations:res,paymentProblems:bad})}));
@@ -142,6 +153,6 @@ exports.jobs=()=>{
    else if(!sub.reminders.includes(99)&&!sub.cancelRequestedAt){tellOwner(sub.hotel,'Subscription renews soon',['Your plan ends on '+day(sub.periodEnd)+'. Renew from Settings to keep your features.']);await D.Subscription.updateOne({_id:sub._id},{$push:{reminders:99}})}}});
  cron.schedule('0 7 * * *',async()=>{const t=new Date();t.setUTCHours(0,0,0,0);
   for(const r of await D.Reservation.find({status:'confirmed',reminded:{$ne:true},checkIn:{$gte:new Date(+t+864e5),$lt:new Date(+t+2*864e5)}}).limit(500)){
-   if(r.guest.email){const h=await D.Hotel.findById(r.hotel);mail.send(r.guest.email,'See you tomorrow, '+r.reference,mail.tpl('Your stay starts tomorrow',[h.name+(h.address?', '+h.address:''),'Reference: '+r.reference,'Contact the hotel: '+(h.phone||'see booking page')]),r.hotel)}
+   if(r.guest.email){const [h,t]=await Promise.all([D.Hotel.findById(r.hotel).lean(),D.RoomType.findById(r.roomType).lean()]),m=E.guestReminder({hotel:h,r,type:t});mail.send(r.guest.email,m.subject,m.html,r.hotel)}
    notify.guest(r,'reminder',[r.guest.name,(await D.Hotel.findById(r.hotel)).name,day(r.checkIn),r.reference]);await D.Reservation.updateOne({_id:r._id},{reminded:true})}});
 };

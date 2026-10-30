@@ -1,4 +1,4 @@
-const D=require('./models'),inv=require('./inventory'),bill=require('./billing'),mail=require('./mail'),hooks=require('./hooks'),pricing=require('./pricing'),pdf=require('./pdf'),notify=require('./notify'),base=require('./extra');
+const D=require('./models'),inv=require('./inventory'),bill=require('./billing'),mail=require('./mail'),hooks=require('./hooks'),pricing=require('./pricing'),pdf=require('./pdf'),notify=require('./notify'),base=require('./extra'),alerts=require('./alerts'),E=require('./emails');
 const {z}=require('zod'),crypto=require('crypto'),dns=require('dns').promises,cron=require('node-cron'),rate=require('express-rate-limit'),mongoose=require('mongoose');
 const OID=x=>new mongoose.Types.ObjectId(String(x)),day=x=>new Date(x).toISOString().slice(0,10),sha=x=>crypto.createHash('sha256').update(String(x)).digest('hex'),hex=n=>crypto.randomBytes(n).toString('hex');
 const wa=(phone,text)=>{let p=String(phone||'').replace(/\D/g,'');if(p.startsWith('0'))p='234'+p.slice(1);return `https://wa.me/${p}?text=${encodeURIComponent(text)}`};
@@ -49,7 +49,7 @@ exports.mount=({api,auth,need,admin,audit,parse,wrap})=>{
   const r=await D.Reservation.create({hotel:q.h.id,branch:t.branch,roomType:t.id,guest:b.guest,checkIn:b.checkIn,checkOut:b.checkOut,adults:b.adults,qty:b.qty,accommodation:k.accommodation,discount:k.discount,promoCode:k.promoCode,tax:k.tax,total:k.total,deposit:k.deposit,balanceDue:k.dueDate,currency:q.h.currency,reference:ref,manageToken:token,commissionRate:sub.status==='trialing'?0:(plan.commissionRate||0),marketingConsent:b.marketingConsent,status:online?'pending':'requested'});
   if(b.recover)await D.Enquiry.updateOne({token:b.recover,hotel:q.h.id},{status:'converted',reservation:r.id});hooks.emit(q.h.id,'reservation.created',{reference:ref});
   const hold={hotel:q.h.id,branch:t.branch,roomType:t.id,checkIn:b.checkIn,checkOut:b.checkOut,qty:b.qty,reservation:r.id};
-  if(!online){await D.Hold.create({...hold,expiresAt:new Date('2999-01-01'),status:'converted'});tellOwner(q.h.id,'New booking request '+ref,[`${b.guest.name}, ${b.guest.phone}`,`${day(b.checkIn)} to ${day(b.checkOut)}`]);
+  if(!online){await D.Hold.create({...hold,expiresAt:new Date('2999-01-01'),status:'converted'});alerts.bookingRequest(r);
    return s.status(201).json({reference:ref,token,status:'requested',message:'Booking request sent. The hotel will contact you with payment instructions. No payment has been taken.'})}
   await D.Hold.create({...hold,expiresAt:new Date(Date.now()+q.h.holdMinutes*6e4)});const pr='PAY-'+hex(8);
   const charge=r2((r.commissionRate||0)*k.accommodation*(k.deposit/k.total)),sa=q.h.payout.subaccountCode,init=await bill.initialize(b.guest.email,k.deposit,pr,`${process.env.CLIENT_URL}/booking/${ref}?token=${token}`,{subaccount:sa,charge});
@@ -200,6 +200,6 @@ exports.jobs=()=>{
     if(d>=n&&!sub.reminders.includes(n)){if(n!==3||!await D.RoomType.exists({hotel:sub.hotel}))tellOwner(sub.hotel,'Your keykonnec trial',[line]);await D.Subscription.updateOne({_id:sub._id},{$push:{reminders:n}})}}});
  cron.schedule('0 8 * * *',async()=>{const now=new Date();// payment due dates: remind guests about balances due within 2 days
   for(const r of await D.Reservation.find({status:'confirmed',paymentStatus:'partial',balanceReminded:{$ne:true},balanceDue:{$gte:now,$lt:new Date(+now+2*864e5)}}).limit(500)){
-   if(r.guest.email){const h=await D.Hotel.findById(r.hotel);mail.send(r.guest.email,'Balance due for '+r.reference,mail.tpl('Your balance is due soon',[`${h.name}: balance of ${r.total-r.paid} is due ${day(r.balanceDue)}.`,`${process.env.CLIENT_URL}/booking/${r.reference}?token=${r.manageToken}`]),r.hotel)}
+   if(r.guest.email){const h=await D.Hotel.findById(r.hotel),m=E.guestBalance({hotel:h,r});mail.send(r.guest.email,m.subject,m.html,r.hotel)}
    notify.guest(r,'balance',[r.guest.name,(await D.Hotel.findById(r.hotel)).name,r.reference,String(r.total-r.paid),day(r.balanceDue)]);await D.Reservation.updateOne({_id:r._id},{balanceReminded:true})}});
 };
