@@ -13,7 +13,7 @@ async function applyModify(hotel,id,b,user){const r=await D.Reservation.findOne(
  try{await inv.reserve(r.roomType,b.checkIn,b.checkOut,qty)}catch(e){await inv.reserve(r.roomType,r.checkIn,r.checkOut,r.qty).catch(()=>{});return{error:e.message==='SOLD_OUT'?'Those dates are not available.':e.message}}
  const old=r.total,from={in:r.checkIn,out:r.checkOut};r.checkIn=b.checkIn;r.checkOut=b.checkOut;r.qty=qty;r.accommodation=k.accommodation;r.discount=k.discount;r.tax=k.tax;r.total=k.total;if(b.notes)r.notes=b.notes;
  r.balanceDue=r.paid<r.total?(k.dueDate||r.checkIn):undefined;r.balanceReminded=false;r.paymentStatus=r.paid>=r.total?'paid':r.paid>0?'partial':'unpaid';await r.save();
- await D.Hold.updateOne({reservation:r._id},{checkIn:b.checkIn,checkOut:b.checkOut,qty});
+ await D.Hold.updateOne({reservation:r._id},{checkIn:b.checkIn,checkOut:b.checkOut,qty});await inv.assignRooms(r);
  let refunded=0,left=r.paid-r.total;// price went down below what was paid: refund the difference, newest payment first
  if(left>0)for(const p of await D.Payment.find({reservation:r._id,status:'success',refundStatus:{$ne:'pending'},$or:[{source:'platform'},{verified:true}]}).sort({createdAt:-1})){if(left<=0)break;const amt=Math.min(p.amount-p.refundedAmount,left);if(amt<=0)continue;if(!(await e2.doRefund(hotel,p._id,amt,user))){refunded+=amt;left-=amt}}
  await D.Audit.create({user,hotel,action:'reservation.modify',entity:'Reservation',entityId:r._id,detail:{from,oldTotal:old,newTotal:r.total,refunded}});
@@ -21,7 +21,7 @@ async function applyModify(hotel,id,b,user){const r=await D.Reservation.findOne(
  hooks.emit(hotel,'reservation.modified',{reference:r.reference});return{total:r.total,diff:r.total-old,refunded,owing:Math.max(0,r.total-r.paid)}}
 async function doCancel(hotel,id,user){const r=await D.Reservation.findOne({_id:id,hotel,status:{$in:['pending','confirmed','requested']}});if(!r)return 'This reservation cannot be cancelled';
  const h=await D.Hold.findOne({reservation:r._id,status:'converted'});if(h){await inv.release(r.roomType,inv.nightsOf(r.checkIn,r.checkOut),r.qty);h.status='released';await h.save()}
- r.status='cancelled';await r.save();await D.Audit.create({user,hotel,action:'reservation.cancelled',entity:'Reservation',entityId:r._id});
+ r.status='cancelled';r.assignedRooms=[];await r.save();await D.Audit.create({user,hotel,action:'reservation.cancelled',entity:'Reservation',entityId:r._id});
  if(r.guest.email){const [hh,tt]=await Promise.all([D.Hotel.findById(hotel).lean(),D.RoomType.findById(r.roomType).lean()]),m=E.guestCancelled({hotel:hh,r,type:tt});mail.send(r.guest.email,m.subject,m.html,hotel)}hooks.emit(hotel,'reservation.cancelled',{reference:r.reference})}
 exports.requestApproval=async(q,action,payload)=>{const a=await D.Approval.create({hotel:q.hotelId,action,payload,requestedBy:q.user.id});await D.Audit.create({user:q.user.id,hotel:q.hotelId,action:'approval.requested',entity:'Approval',entityId:a._id,detail:{action}});tellOwner(q.hotelId,'An action needs your approval',[`Type: ${action}. Open Integrations in your dashboard to decide.`])};
 const execApproval=async(a,user)=>{const p=a.payload;if(a.action==='refund')return e2.doRefund(a.hotel,p.payment,p.amount,user);if(a.action==='cancel')return doCancel(a.hotel,p.reservation,user);

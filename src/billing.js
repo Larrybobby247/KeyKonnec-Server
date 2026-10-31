@@ -39,7 +39,7 @@ async function settleOne(p,d){
  await Hold.updateOne({_id:h._id},{status:'converted'});
  await Payment.updateOne({_id:p._id},{status:'success',verified:true,flagReason:null});await recordCommission(r,p);
  const paid=r.paid+p.amount;await Reservation.updateOne({_id:r._id},{paid,status:'confirmed',paymentStatus:paid>=r.total?'paid':'partial'});
- try{const fresh=await Reservation.findById(r._id);hooks.emit(r.hotel,'payment.succeeded',{reservation:r.reference,amount:p.amount});hooks.emit(r.hotel,'reservation.confirmed',{reference:r.reference});
+ try{const fresh=await Reservation.findById(r._id);await inv.assignRooms(fresh);hooks.emit(r.hotel,'payment.succeeded',{reservation:r.reference,amount:p.amount});hooks.emit(r.hotel,'reservation.confirmed',{reference:r.reference});
   notify.guest(r,'confirm',[r.guest.name,(await Hotel.findById(r.hotel)).name,r.reference,r.checkIn.toISOString().slice(0,10),r.checkOut.toISOString().slice(0,10)]);
   await require('./alerts').bookingPaid(fresh,p)}catch(e){console.error('booking alerts:',e.message)}}
 exports.commissionFor=async r=>{if(!r.commissionRate||r.source!=='online'||r.status!=='checked_out')return;

@@ -1,7 +1,7 @@
 require('dotenv').config();const compression=require('compression');
 const express=require('express'),mongoose=require('mongoose'),cors=require('cors'),helmet=require('helmet'),cookie=require('cookie-parser'),rate=require('express-rate-limit'),cron=require('node-cron');
 const {z}=require('zod'),bcrypt=require('bcryptjs'),jwt=require('jsonwebtoken'),crypto=require('crypto');
-const D=require('./models'),inv=require('./inventory'),bill=require('./billing'),mail=require('./mail'),hooks=require('./hooks'),extra=require('./extra'),extra2=require('./extra2'),extra3=require('./extra3'),extra4=require('./extra4');
+const D=require('./models'),inv=require('./inventory'),bill=require('./billing'),mail=require('./mail'),hooks=require('./hooks'),extra=require('./extra'),extra2=require('./extra2'),extra3=require('./extra3'),extra4=require('./extra4'),extra5=require('./extra5');
 const app=express(),api=express.Router(),wrap=f=>(q,s,n)=>f(q,s,n).catch(n);
 app.use(helmet());app.use(compression());app.use(require('./cors'));app.use(cookie());
 // Webhook needs the raw body for signature verification.
@@ -47,7 +47,8 @@ api.patch('/rooms/:id/status',auth,need('owner','manager','receptionist'),wrap(a
 const move=(to,from)=>[auth,wrap(async(q,s)=>{const r=await D.Reservation.findOne({_id:q.params.id,hotel:q.hotelId,branch:{$in:q.user.memberships[0].branches}});if(!r)return s.sendStatus(404);
  if(!from.includes(r.status))return s.status(409).json({error:`Cannot do this while ${r.status}`});if(to==='checked_in'&&r.checkIn>new Date(Date.now()+36e5))return s.status(409).json({error:`Check-in opens on the arrival date (${r.checkIn.toISOString().slice(0,10)}). Change the dates with Modify if the guest is arriving early.`});if(to==='no_show'&&r.checkIn>new Date())return s.status(409).json({error:'A no-show can be recorded once the arrival date has started'});if(to==='cancelled'&&r.paid>0&&q.role!=='owner'&&(await bill.entitlements(q.hotelId)).plan.features.includes('approvals')){await extra3.requestApproval(q,'cancel',{reservation:r.id});return s.status(202).json({pending:true,message:'Sent to the owner for approval'})}
  if(['cancelled','no_show'].includes(to)){const h=await D.Hold.findOne({reservation:r.id,status:'converted'});if(h){await inv.release(r.roomType,inv.nightsOf(r.checkIn,r.checkOut),r.qty);h.status='released';await h.save()}}
- r.status=to;await r.save();if(to==='checked_out')await bill.commissionFor(r);if(to==='cancelled'&&r.guest.email){const [hh,tt]=await Promise.all([D.Hotel.findById(r.hotel).lean(),D.RoomType.findById(r.roomType).lean()]),m=require('./emails').guestCancelled({hotel:hh,r,type:tt});mail.send(r.guest.email,m.subject,m.html,r.hotel)}await audit(q,'reservation.'+to,'Reservation',r.id);hooks.emit(q.hotelId,'reservation.'+to,{reference:r.reference});s.json(r)})];
+ if(to==='checked_in')r.assignedRooms=await inv.assignRooms({...r.toObject(),status:'confirmed'});if(['cancelled','no_show'].includes(to))r.assignedRooms=[];
+ r.status=to;await r.save();if(to==='checked_in')await D.Room.updateMany({_id:{$in:r.assignedRooms}},{status:'occupied'});if(to==='checked_out')await D.Room.updateMany({_id:{$in:r.assignedRooms}},{status:'cleaning',housekeeping:'dirty'});if(to==='checked_out')await bill.commissionFor(r);if(to==='cancelled'&&r.guest.email){const [hh,tt]=await Promise.all([D.Hotel.findById(r.hotel).lean(),D.RoomType.findById(r.roomType).lean()]),m=require('./emails').guestCancelled({hotel:hh,r,type:tt});mail.send(r.guest.email,m.subject,m.html,r.hotel)}await audit(q,'reservation.'+to,'Reservation',r.id);hooks.emit(q.hotelId,'reservation.'+to,{reference:r.reference});s.json(r)})];
 api.post('/reservations/:id/cancel',...move('cancelled',['pending','confirmed']));
 api.post('/reservations/:id/check-in',...move('checked_in',['confirmed']));
 api.post('/reservations/:id/check-out',...move('checked_out',['checked_in']));
@@ -74,7 +75,7 @@ api.get('/public/booking/:ref',wrap(async(q,s)=>{const r=await D.Reservation.fin
 api.get('/admin/plans',...admin,wrap(async(q,s)=>s.json(await D.Plan.find())));
 api.patch('/admin/plans/:id',...admin,wrap(async(q,s)=>s.json(await D.Plan.findByIdAndUpdate(q.params.id,parse(z.object({price:z.number().min(0),commissionRate:z.number().min(0).max(1),rooms:z.number(),branches:z.number(),staff:z.number(),monthlyBookings:z.number(),trialDays:z.number().int().min(0).max(90),features:z.array(z.string())}).partial(),q.body),{new:true}))));
 api.get('/admin/commissions',...admin,wrap(async(q,s)=>s.json(await D.Commission.find().sort({createdAt:-1}).limit(100))));
-const ctx={api,auth,need,admin,audit,parse,wrap};extra4.mount(ctx);extra3.mount(ctx);extra.mount(ctx);extra2.mount(ctx);extra.jobs();extra2.jobs();extra3.jobs();
+const ctx={api,auth,need,admin,audit,parse,wrap};extra5.mount(ctx);extra4.mount(ctx);extra3.mount(ctx);extra.mount(ctx);extra2.mount(ctx);extra.jobs();extra2.jobs();extra3.jobs();
 app.use((e,q,s,n)=>{if(e.name==='ZodError')return s.status(400).json({error:'Invalid input',details:e.issues});if(e.status&&e.status<500)return s.status(e.status).json({error:e.message});console.error(e);s.status(500).json({error:'Something went wrong'})});
 // ---- jobs: expire holds each minute; 
 cron.schedule('* * * * *',()=>inv.expireHolds().catch(console.error));
