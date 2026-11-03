@@ -17,7 +17,7 @@ exports.mount=({api,auth,need,audit,parse,wrap})=>{
  // ---- which rooms can a reservation use? (free = nobody else holds it for those dates)
  api.get('/reservations/:id/rooms',auth,need('owner','manager','receptionist'),wrap(async(q,s)=>{const r=await D.Reservation.findOne({_id:q.params.id,hotel:q.hotelId,branch:{$in:MB(q)}});if(!r)return s.sendStatus(404);
   const all=await D.Room.find({roomType:r.roomType,active:true}).lean(),free=new Set((await inv.freeRoomList(r)).map(x=>String(x._id))),mine=new Set((r.assignedRooms||[]).map(String));
-  s.json({qty:r.qty,rooms:all.sort((a,b)=>String(a.number).localeCompare(String(b.number),undefined,{numeric:true})).map(x=>({_id:x._id,number:x.number,status:x.status,mine:mine.has(String(x._id)),free:mine.has(String(x._id))||free.has(String(x._id)),reason:['maintenance','out_of_service'].includes(x.status)?x.status.replace('_',' '):free.has(String(x._id))||mine.has(String(x._id))?null:'booked'}))})}));
+  s.json({qty:r.qty,rooms:all.sort((a,b)=>String(a.number).localeCompare(String(b.number),undefined,{numeric:true})).map(x=>({_id:x._id,number:x.number,status:x.status,mine:mine.has(String(x._id)),free:mine.has(String(x._id))||free.has(String(x._id)),reason:['maintenance','out_of_service','cleaning'].includes(x.status)?x.status.replace('_',' '):free.has(String(x._id))||mine.has(String(x._id))?null:'booked'}))})}));
  // ---- analytics
  api.get('/reports/dashboard',auth,need('owner','manager','accountant','receptionist'),wrap(async(q,s)=>{
   const ent=await bill.entitlements(q.hotelId),F=ent.plan.features,tier=F.includes('analytics')?'pro':F.includes('reports_plus')?'plus':'basic',days=[7,14,30,90].includes(+q.query.days)?+q.query.days:30;
@@ -41,7 +41,7 @@ exports.mount=({api,auth,need,audit,parse,wrap})=>{
   const bk={};okc.forEach(r=>{const d=dk(r.createdAt);bk[d]=(bk[d]||0)+1});
   const nightsOf=r=>Math.max(1,Math.round((new Date(r.checkOut)-new Date(r.checkIn))/864e5));
   // occupancy
-  const capByType={};rooms.filter(r=>!['maintenance','out_of_service'].includes(r.status)).forEach(r=>{capByType[r.roomType]=(capByType[r.roomType]||0)+1});const cap=Object.values(capByType).reduce((a,b)=>a+b,0);
+  const capByType={};rooms.filter(r=>!['maintenance','out_of_service','cleaning'].includes(r.status)).forEach(r=>{capByType[r.roomType]=(capByType[r.roomType]||0)+1});const cap=Object.values(capByType).reduce((a,b)=>a+b,0);
   const usedByDay={},usedByDayBranch={};for(const n of nights){const d=dk(n._id.d);usedByDay[d]=(usedByDay[d]||0)+n.used;const b=String((types.find(t=>String(t._id)===String(n._id.t))||{}).branch);(usedByDayBranch[b]=usedByDayBranch[b]||{})[d]=(usedByDayBranch[b][d]||0)+n.used}
   const occ=[];for(let t=+occFrom;t<+occTo;t+=864e5){const d=dk(t),u=usedByDay[d]||0;occ.push({d,used:Math.min(u,cap||u),rooms:cap,pct:cap?r0(Math.min(100,u/cap*100)):0,future:t>+today})}
   const next14=occ.filter(o=>o.d>=dk(today)),avgOcc=next14.length?r0(next14.reduce((a,o)=>a+o.pct,0)/next14.length):0;
@@ -62,7 +62,7 @@ exports.mount=({api,auth,need,audit,parse,wrap})=>{
    const lead=okc.map(r=>(new Date(r.checkIn)-new Date(r.createdAt))/864e5).filter(x=>x>=0);out.leadTime=lead.length?r1(lead.reduce((a,b)=>a+b,0)/lead.length):0;out.noShowRate=cur.length?r1(cur.filter(r=>r.status==='no_show').length/cur.length*100):0;
    const g={};okc.forEach(r=>{const e=(r.guest&&r.guest.email||'').toLowerCase();if(!e)return;const o=g[e]||(g[e]={name:r.guest.name,email:e,stays:0,spent:0});o.stays++;o.spent+=r.paid||0});const gl=Object.values(g);out.repeatGuests=gl.filter(x=>x.stays>1).length;out.topGuests=gl.sort((a,b)=>b.spent-a.spent).slice(0,5);
    const fut=await D.Reservation.find({hotel:q.hotelId,branch:{$in:ids},status:{$in:['confirmed','checked_in']},checkIn:{$gte:today,$lt:new Date(+today+30*864e5)}}).select('total paid').lean();out.forecast={bookings:fut.length,value:r0(fut.reduce((a,r)=>a+(r.total||0),0)),collected:r0(fut.reduce((a,r)=>a+(r.paid||0),0))};
-   if(ids.length>1){out.byBranch=ids.map(id=>{const rs=okc.filter(r=>String(r.branch)===id),bt=Object.values(rs.reduce((m,r)=>{(m[r.roomType]=m[r.roomType]||{n:tn(r.roomType),c:0}).c++;return m},{})).sort((a,b)=>b.c-a.c)[0],bc=rooms.filter(r=>String(r.branch)===id&&!['maintenance','out_of_service'].includes(r.status)).length,ub=usedByDayBranch[id]||{},nx=next14.map(o=>ub[o.d]||0);
+   if(ids.length>1){out.byBranch=ids.map(id=>{const rs=okc.filter(r=>String(r.branch)===id),bt=Object.values(rs.reduce((m,r)=>{(m[r.roomType]=m[r.roomType]||{n:tn(r.roomType),c:0}).c++;return m},{})).sort((a,b)=>b.c-a.c)[0],bc=rooms.filter(r=>String(r.branch)===id&&!['maintenance','out_of_service','cleaning'].includes(r.status)).length,ub=usedByDayBranch[id]||{},nx=next14.map(o=>ub[o.d]||0);
      return{id,name:bn(id),revenue:r0(revByBranch[id]||0),bookings:rs.length,rooms:bc,occupancy:bc&&nx.length?r0(nx.reduce((a,b)=>a+b,0)/nx.length/bc*100):0,bestRoomType:bt?bt.n:null}}).sort((a,b)=>b.revenue-a.revenue)}}
   s.json(out)}));
 };

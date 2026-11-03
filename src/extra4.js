@@ -24,8 +24,8 @@ exports.mount=({api,auth,need,admin,audit,parse,wrap})=>{
  api.use('/staff',auth,allow('staff'));// plan gate for the whole staff area
  // ===== access: the sidebar and permissions the frontend renders =====
  api.get('/me/access',auth,wrap(async(q,s)=>{const u=q.user;if(u.role==='admin')return s.json({admin:true,user:{id:u.id,name:u.name,email:u.email,role:'admin'}});
-  const [h,e,brs]=await Promise.all([D.Hotel.findById(q.hotelId).select('-payout.subaccountCode -icalToken -website.draft -website.published'),bill.entitlements(q.hotelId),D.Branch.find({hotel:q.hotelId,_id:{$in:u.memberships[0].branches}}).select('name').lean()]),nav=navFor(q.role,e.plan.features),sub=e.sub;
-  s.json({user:{id:u.id,name:u.name,email:u.email,role:q.role},hotel:{id:h.id,name:h.name,slug:h.slug,phone:h.phone,address:h.address,logo:h.logo,payoutSet:!!(h.payout&&h.payout.last4),websiteStatus:h.website&&h.website.status},
+  const [h,e,brs]=await Promise.all([D.Hotel.findById(q.hotelId).select('-payout.subaccountCode -icalToken -website.draft -website.published'),bill.entitlements(q.hotelId),D.Branch.find({hotel:q.hotelId,_id:{$in:u.memberships[0].branches}}).select('name').lean()]),nav=navFor(q.role,e.plan.features),sub=e.sub,tb=await D.Branch.countDocuments({hotel:q.hotelId,status:'active'});
+  s.json({user:{id:u.id,name:u.name,email:u.email,role:q.role},hotel:{id:h.id,name:h.name,slug:h.slug,phone:h.phone,address:h.address,logo:h.logo,totalBranches:tb,payoutSet:!!(h.payout&&h.payout.last4),websiteStatus:h.website&&h.website.status},
    plan:{key:e.plan.key,name:e.plan.name,price:e.plan.price,interval:e.plan.interval,features:e.plan.features,limits:{rooms:e.plan.rooms,staff:e.plan.staff,branches:e.plan.branches,monthlyBookings:e.plan.monthlyBookings}},
    subscription:{status:sub.status,pendingPlan:sub.pendingPlan||null,trialEnd:sub.trialEnd,periodEnd:sub.periodEnd,cancelRequestedAt:sub.cancelRequestedAt,trialUsed:!!sub.trialUsed},nav,permissions:nav.flatMap(g=>g.items.map(i=>i.id)),
    branches:brs})}));
