@@ -34,7 +34,8 @@ api.post('/auth/login',rate({windowMs:9e5,limit:20}),wrap(async(q,s)=>{const u=a
 api.get('/auth/me',auth,(q,s)=>s.json({user:{id:q.user.id,name:q.user.name,role:q.role}}));
 api.post('/auth/logout',(q,s)=>s.clearCookie('t').json({ok:true}));
 // ---- hotel setup (limits enforced server-side)
-api.get('/hotel',auth,wrap(async(q,s)=>{const [h,e,b]=await Promise.all([D.Hotel.findById(q.hotelId).select('-payout.subaccountCode -icalToken -website.draft -website.published'),bill.entitlements(q.hotelId),D.Branch.find({hotel:q.hotelId})]);s.json({hotel:h,subscription:e.sub,plan:e.plan,branches:b})}));
+api.get('/hotel',auth,wrap(async(q,s)=>{const [h,e,b]=await Promise.all([D.Hotel.findById(q.hotelId).select('-payout.subaccountCode -icalToken -website.draft -website.published'),bill.entitlements(q.hotelId),D.Branch.find({hotel:q.hotelId,_id:{$in:q.user.memberships[0].branches}})]);// a user only ever sees the branches they were added to
+s.json({hotel:h,subscription:e.sub,plan:e.plan,branches:b})}));
 
 api.post('/rooms',auth,need('owner','manager'),wrap(async(q,s)=>{const b=parse(z.object({roomType:z.string(),number:z.string()}),q.body);
  const rt=await D.RoomType.findOne({_id:b.roomType,hotel:q.hotelId});if(!rt)return s.status(404).json({error:'Room type not found'});

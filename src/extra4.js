@@ -41,7 +41,10 @@ exports.mount=({api,auth,need,admin,audit,parse,wrap})=>{
   if(q.query.view==='calendar'&&q.query.from&&q.query.to){f.checkIn={$lt:new Date(q.query.to)};f.checkOut={$gt:new Date(q.query.from)}}
   else if(q.query.from||q.query.to){f.checkIn={};if(q.query.from)f.checkIn.$gte=new Date(q.query.from);if(q.query.to)f.checkIn.$lt=new Date(+new Date(q.query.to)+864e5)}
   if(q.query.q){const re=new RegExp(esc(q.query.q),'i');f.$or=[{reference:re},{'guest.name':re},{'guest.email':re}]}
-  const p=Math.max(1,+q.query.page||1),lim=Math.min(200,+q.query.limit||20),[items,total]=await Promise.all([D.Reservation.find(f).sort({checkIn:-1}).skip((p-1)*lim).limit(lim).populate('roomType','name').populate('assignedRooms','number').select('-manageToken').lean(),D.Reservation.countDocuments(f)]);s.json({items,total,page:p})}));
+  const p=Math.max(1,+q.query.page||1),lim=Math.min(200,+q.query.limit||20),[items,total]=await Promise.all([D.Reservation.find(f).sort({checkIn:-1}).skip((p-1)*lim).limit(lim).populate('roomType','name').populate('assignedRooms','number').select('-manageToken').lean(),D.Reservation.countDocuments(f)]);
+  // Bookings made before automatic assignment existed (or confirmed without a free room at the time) get their room now and keep it afterwards.
+  for(const it of items){if(['confirmed','checked_in'].includes(it.status)&&!(it.assignedRooms||[]).length){const ids=await inv.assignRooms(it);if(ids.length)it.assignedRooms=await D.Room.find({_id:{$in:ids}}).select('number').lean()}}
+  s.json({items,total,page:p})}));
  api.get('/reservations/:id',auth,allow('reservations'),wrap(async(q,s)=>{let r=await D.Reservation.findOne({_id:q.params.id,hotel:q.hotelId,branch:{$in:q.user.memberships[0].branches}});if(!r)return s.sendStatus(404);
   if(['confirmed','checked_in'].includes(r.status)&&!(r.assignedRooms||[]).length)await inv.assignRooms(r);// older bookings get their rooms the first time they are opened
   r=await D.Reservation.findById(r._id).populate('roomType','name category bedType beds capacity price').populate('assignedRooms','number status').select('-manageToken');const br=await D.Branch.findById(r.branch).select('name address').lean();
