@@ -75,7 +75,7 @@ exports.mount=({api,auth,need,admin,audit,parse,wrap})=>{
   await inv.assignRooms(r);await audit(q,'reservation.confirm','Reservation',r.id);if(r.guest.email){const [h,t]=await Promise.all([D.Hotel.findById(r.hotel).lean(),D.RoomType.findById(r.roomType).lean()]),m=E.guestApproved({hotel:h,r,type:t});mail.send(r.guest.email,m.subject,m.html,r.hotel)}s.json(r)}));
  // ---- payments, refunds
  const fin=need('owner','manager','accountant');
- api.get('/payments',auth,fin,wrap(async(q,s)=>{const p=Math.max(1,+q.query.page||1),f={hotel:q.hotelId};s.json({items:await D.Payment.find(f).sort({createdAt:-1}).skip((p-1)*30).limit(30).populate('reservation','reference guest.name').lean(),total:await D.Payment.countDocuments(f)})}));
+ api.get('/payments',auth,fin,wrap(async(q,s)=>{const p=Math.max(1,+q.query.page||1),mb=q.user.memberships[0].branches,f={hotel:q.hotelId,branch:q.query.branch&&mb.map(String).includes(String(q.query.branch))?q.query.branch:{$in:mb}};s.json({items:await D.Payment.find(f).sort({createdAt:-1}).skip((p-1)*30).limit(30).populate('reservation','reference guest.name').lean(),total:await D.Payment.countDocuments(f)})}));
  api.post('/payments/:id/recheck',auth,fin,wrap(async(q,s)=>{const p=await D.Payment.findOne({_id:q.params.id,hotel:q.hotelId,source:'platform'});if(!p)return s.sendStatus(404);
   if(p.status==='processing'&&Date.now()-new Date(p.updatedAt)>5*60000)await D.Payment.updateOne({_id:p._id,status:'processing'},{status:'pending'});
   if(!['pending','flagged','failed','processing'].includes(p.status))return s.status(409).json({error:'This payment does not need re-checking.'});
@@ -112,10 +112,10 @@ exports.mount=({api,auth,need,admin,audit,parse,wrap})=>{
  api.delete('/tasks/:id',auth,need('owner','manager','receptionist'),wrap(async(q,s)=>{const t=await D.Task.findOneAndDelete({_id:q.params.id,hotel:q.hotelId,branch:{$in:q.user.memberships[0].branches}});if(!t)return s.sendStatus(404);
   if(t.status!=='done')await D.Room.updateOne({_id:t.room},{status:'vacant'});await audit(q,'task.delete','Task',t.id);s.json({ok:true})}));
  // ---- reports
- api.get('/reports/finance',auth,fin,wrap(async(q,s)=>{const H=OID(q.hotelId);const [pay,out,com]=await Promise.all([
-  D.Payment.aggregate([{$match:{hotel:H,status:'success'}},{$group:{_id:{source:'$source',verified:'$verified'},total:{$sum:'$amount'},refunded:{$sum:'$refundedAmount'}}}]),
-  D.Reservation.aggregate([{$match:{hotel:H,status:{$in:['pending','requested','confirmed','checked_in']}}},{$group:{_id:null,t:{$sum:{$subtract:['$total','$paid']}}}}]),
-  D.Commission.aggregate([{$match:{hotel:H}},{$group:{_id:'$status',amount:{$sum:'$amount'}}}])]);s.json({payments:pay,outstanding:out[0]?.t||0,commissions:com})}));
+ api.get('/reports/finance',auth,fin,wrap(async(q,s)=>{const H=OID(q.hotelId),mb=q.user.memberships[0].branches.map(String),B=(q.query.branch&&mb.includes(String(q.query.branch))?[String(q.query.branch)]:mb).map(OID),rids=await D.Reservation.find({hotel:q.hotelId,branch:{$in:B}}).distinct('_id');const [pay,out,com]=await Promise.all([
+  D.Payment.aggregate([{$match:{hotel:H,branch:{$in:B},status:'success'}},{$group:{_id:{source:'$source',verified:'$verified'},total:{$sum:'$amount'},refunded:{$sum:'$refundedAmount'}}}]),
+  D.Reservation.aggregate([{$match:{hotel:H,branch:{$in:B},status:{$in:['pending','requested','confirmed','checked_in']}}},{$group:{_id:null,t:{$sum:{$subtract:['$total','$paid']}}}}]),
+  D.Commission.aggregate([{$match:{hotel:H,reservation:{$in:rids}}},{$group:{_id:'$status',amount:{$sum:'$amount'}}}])]);s.json({payments:pay,outstanding:out[0]?.t||0,commissions:com})}));
  api.get('/reports/occupancy',auth,wrap(async(q,s)=>{const from=q.query.from?new Date(q.query.from):new Date();from.setUTCHours(0,0,0,0);const to=new Date(+from+14*864e5);
   const ids=(await D.RoomType.find({hotel:q.hotelId,branch:{$in:q.user.memberships[0].branches}}).select('_id')).map(t=>t._id),rooms=await D.Room.countDocuments({roomType:{$in:ids},active:true});
   s.json({rooms,rows:await D.Night.aggregate([{$match:{roomType:{$in:ids},date:{$gte:from,$lt:to}}},{$group:{_id:'$date',used:{$sum:'$used'}}},{$sort:{_id:1}}])})}));
@@ -127,7 +127,7 @@ exports.mount=({api,auth,need,admin,audit,parse,wrap})=>{
    totals:[{$group:{_id:null,n:{$sum:1},cancelled:{$sum:{$cond:[{$eq:['$status','cancelled']},1,0]}},value:{$sum:'$total'},nights:{$sum:{$divide:[{$subtract:['$checkOut','$checkIn']},864e5]}}}}]}}]);
   const [ts,bs]=await Promise.all([D.RoomType.find({hotel:q.hotelId}),D.Branch.find({hotel:q.hotelId})]),nm=(l,id)=>(l.find(a=>String(a._id)===String(id))||{}).name||'Unknown',t=x.totals[0]||{n:0,cancelled:0,value:0,nights:0};
   s.json({byType:x.byType.map(a=>({...a,name:nm(ts,a._id)})),bySource:x.bySource,byBranch:x.byBranch.map(a=>({...a,name:nm(bs,a._id)})),cancelRate:t.n?t.cancelled/t.n:0,avgValue:t.n?t.value/t.n:0,avgStay:t.n?t.nights/t.n:0})}));
- api.get('/reports/export.csv',auth,fin,wrap(async(q,s)=>{if(!await feat(q,'exports'))return deny(s,'exports');const rows=await D.Reservation.find({hotel:q.hotelId}).sort({createdAt:-1}).limit(5000).lean();
+ api.get('/reports/export.csv',auth,fin,wrap(async(q,s)=>{if(!await feat(q,'exports'))return deny(s,'exports');const mb=q.user.memberships[0].branches,rows=await D.Reservation.find({hotel:q.hotelId,branch:q.query.branch&&mb.map(String).includes(String(q.query.branch))?q.query.branch:{$in:mb}}).sort({createdAt:-1}).limit(5000).lean();
   const c=v=>'"'+String(v??'').replace(/"/g,'""')+'"';s.type('text/csv').send(['reference,guest,check_in,check_out,status,source,total,paid'].concat(rows.map(r=>[r.reference,r.guest.name,day(r.checkIn),day(r.checkOut),r.status,r.source,r.total,r.paid].map(c).join(','))).join('\n'))}));
  // ---- subscriptions
  api.get('/subscriptions/current',auth,wrap(async(q,s)=>{const e=await bill.entitlements(q.hotelId);s.json({subscription:e.sub,plan:e.plan})}));
