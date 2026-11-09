@@ -7,10 +7,12 @@ test('public website link: custom domain, subdomain, path, trailing slash, missi
  const p=publicUrl({slug:'grand'});assert.equal(p.url,'https://app.example.com/h/grand');assert.equal(p.kind,'path');assert.equal(p.path,'/h/grand');
  const old=process.env.CLIENT_URL;delete process.env.CLIENT_URL;const o=publicUrl({slug:'grand'},{get:h=>h==='origin'?'https://my-dashboard.app/':undefined});assert.equal(o.url,'https://my-dashboard.app/h/grand');assert.equal(publicUrl({slug:'grand'}).path,'/h/grand');process.env.CLIENT_URL=old;
  process.env.SITE_BASE_DOMAIN='keykonnec.com';assert.equal(publicUrl({slug:'grand'}).url,'https://grand.keykonnec.com');delete process.env.SITE_BASE_DOMAIN});
-test('CORS: public routes allow other origins without cookies; private routes allow only the app origin with cookies',async()=>{
- const app=express();app.use(require('../src/cors'));app.all('*',(q,s)=>s.json({ok:1}));const srv=app.listen(0),port=srv.address().port,u=p=>`http://127.0.0.1:${port}${p}`;
+test('CORS: public routes allow the app, hotel subdomains and registered domains without cookies; unknown origins and private routes are refused',async()=>{
+ process.env.SITE_BASE_DOMAIN='keykonnec.com';const app=express();app.use(require('../src/cors'));app.all('*',(q,s)=>s.json({ok:1}));const srv=app.listen(0),port=srv.address().port,u=p=>`http://127.0.0.1:${port}${p}`;
  try{const hotel='https://grand.keykonnec.com',pre=(p,o)=>fetch(u(p),{method:'OPTIONS',headers:{Origin:o,'Access-Control-Request-Method':'POST','Access-Control-Request-Headers':'x-requested-with,content-type'}});
   let r=await pre('/api/public/grand/book',hotel);assert.equal(r.headers.get('access-control-allow-origin'),hotel);assert.equal(r.headers.get('access-control-allow-credentials'),null);
   r=await fetch(u('/api/public/grand'),{headers:{Origin:hotel}});assert.equal(r.headers.get('access-control-allow-origin'),hotel);
   r=await fetch(u('/api/reservations'),{headers:{Origin:hotel}});assert.equal(r.headers.get('access-control-allow-origin'),'https://app.example.com');// not the hotel site, so the browser blocks it
-  r=await fetch(u('/api/reservations'),{headers:{Origin:'https://app.example.com'}});assert.equal(r.headers.get('access-control-allow-origin'),'https://app.example.com');assert.equal(r.headers.get('access-control-allow-credentials'),'true')}finally{srv.close()}});
+  r=await fetch(u('/api/reservations'),{headers:{Origin:'https://app.example.com'}});assert.equal(r.headers.get('access-control-allow-origin'),'https://app.example.com');assert.equal(r.headers.get('access-control-allow-credentials'),'true');
+  r=await fetch(u('/api/public/grand'),{headers:{Origin:'https://evil.example.org'}});assert.equal(r.headers.get('access-control-allow-origin'),null);// not registered: no CORS headers
+ }finally{srv.close();delete process.env.SITE_BASE_DOMAIN}});
