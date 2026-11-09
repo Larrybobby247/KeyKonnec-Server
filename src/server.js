@@ -80,6 +80,6 @@ api.get('/admin/commissions',...admin,wrap(async(q,s)=>s.json(await D.Commission
 const ctx={api,auth,need,admin,audit,parse,wrap};extra5.mount(ctx);extra4.mount(ctx);extra3.mount(ctx);extra.mount(ctx);extra2.mount(ctx);extra.jobs();extra2.jobs();extra3.jobs();
 app.use((e,q,s,n)=>{if(e.name==='ZodError')return s.status(400).json({error:'Invalid input',details:e.issues});if(e.status&&e.status<500)return s.status(e.status).json({error:e.message});console.error(e);s.status(500).json({error:'Something went wrong'})});
 // ---- jobs: expire holds each minute; 
-cron.schedule('* * * * *',()=>inv.expireHolds().catch(console.error));
+cron.schedule('* * * * *',()=>inv.expireHolds().catch(console.error));require('./domainService').start();// background checks for custom domains that are waiting for DNS, verification or SSL
 mongoose.connect(process.env.MONGODB_URI,{maxPoolSize:+process.env.MONGO_POOL_SIZE||20,minPoolSize:2,serverSelectionTimeoutMS:8000,socketTimeoutMS:45000}).then(seedPlans).then(()=>{D.ensureIndexes()}).then(()=>app.listen(process.env.PORT||4000,()=>console.log('API ready')));
 module.exports=app;
