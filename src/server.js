@@ -2,7 +2,9 @@ require('dotenv').config();const compression=require('compression');
 const express=require('express'),mongoose=require('mongoose'),cors=require('cors'),helmet=require('helmet'),cookie=require('cookie-parser'),rate=require('express-rate-limit'),cron=require('node-cron');
 const {z}=require('zod'),bcrypt=require('bcryptjs'),jwt=require('jsonwebtoken'),crypto=require('crypto');
 const D=require('./models'),inv=require('./inventory'),bill=require('./billing'),mail=require('./mail'),hooks=require('./hooks'),extra=require('./extra'),extra2=require('./extra2'),extra3=require('./extra3'),extra4=require('./extra4'),extra5=require('./extra5');
-const app=express(),api=express.Router(),wrap=f=>(q,s,n)=>f(q,s,n).catch(n);
+const app=express(),api=express.Router(),wrap=f=>(q,s,n)=>f(q,s,n).catch(n),session=require('./session');
+app.set('trust proxy',+process.env.TRUST_PROXY||1);// behind Render/Railway/Vercel: use each visitor's real IP, otherwise every user shares one rate-limit bucket
+session.warn();
 app.use(helmet());app.use(compression());app.use(require('./cors'));app.use(cookie());
 // Webhook needs the raw body for signature verification.
 app.post('/api/payments/webhook',express.raw({type:'application/json'}),wrap(async(q,s)=>{
@@ -12,7 +14,7 @@ app.get('/api/whatsapp/webhook',extra3.waVerify);app.post('/api/whatsapp/webhook
 app.use(express.json({limit:'100kb'}));app.use('/api',(q,s,n)=>q.method==='GET'||q.get('x-requested-with')==='keykonnec'?n():s.status(403).json({error:'Blocked request'}));app.use('/api',(q,s,n)=>{s.set('Cache-Control','private, no-cache');n()});// authenticated and tenant data is never shared-cacheable; public routes opt in below
 app.use('/api',rate({windowMs:60000,limit:120}),api);
 const seedPlans=require('./plans').seed;
-const sign=(res,u)=>res.cookie('t',jwt.sign({id:u.id},process.env.JWT_SECRET,{expiresIn:'7d'}),{httpOnly:true,sameSite:process.env.NODE_ENV==='production'?'none':'lax',secure:process.env.NODE_ENV==='production',maxAge:6048e5});
+const sign=(res,u)=>res.cookie('t',jwt.sign({id:u.id},process.env.JWT_SECRET,{expiresIn:'7d'}),session.options());
 // Auth + tenant: hotel/branch always come from the user's membership, never from the client.
 const auth=wrap(async(q,s,n)=>{try{q.user=await D.User.findById(jwt.verify(q.cookies.t,process.env.JWT_SECRET).id)}catch{}
  if(!q.user||q.user.status!=='active')return s.status(401).json({error:'Unauthenticated'});const m=q.user.memberships[0];q.hotelId=m&&m.hotel;q.role=m?m.role:q.user.role;
@@ -32,7 +34,7 @@ api.post('/auth/register',wrap(async(q,s)=>{const b=parse(z.object({name:z.strin
 api.post('/auth/login',rate({windowMs:9e5,limit:20}),wrap(async(q,s)=>{const u=await D.User.findOne({email:String(q.body.email).toLowerCase()});
  if(!u||!await bcrypt.compare(String(q.body.password),u.passwordHash))return s.status(401).json({error:'Wrong email or password'});if(u.status!=='active')return s.status(403).json({error:'This account is disabled'});if(!u.emailVerified)return s.status(403).json({error:'Please verify your email first. Check your inbox.',needsVerification:true});sign(s,u);s.json({user:{id:u.id,name:u.name,role:u.role}})}));
 api.get('/auth/me',auth,(q,s)=>s.json({user:{id:q.user.id,name:q.user.name,role:q.role}}));
-api.post('/auth/logout',(q,s)=>s.clearCookie('t').json({ok:true}));
+api.post('/auth/logout',(q,s)=>s.clearCookie('t',session.clearOptions()).json({ok:true}));
 // ---- hotel setup (limits enforced server-side)
 api.get('/hotel',auth,wrap(async(q,s)=>{const [h,e,b]=await Promise.all([D.Hotel.findById(q.hotelId).select('-payout.subaccountCode -icalToken -website.draft -website.published'),bill.entitlements(q.hotelId),D.Branch.find({hotel:q.hotelId,_id:{$in:q.user.memberships[0].branches}})]);// a user only ever sees the branches they were added to
 s.json({hotel:h,subscription:e.sub,plan:e.plan,branches:b})}));
