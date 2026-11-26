@@ -40,6 +40,6 @@ exports.toText=toText;
 // opts: {replyTo} so a guest's reply reaches the hotel.
 exports.send=async(to,subject,html,hotel,opts={})=>{let n;const list=[].concat(to).filter(Boolean);try{n=await Notification.create({to:list.join(', '),subject,hotel,status:'queued'});
  if(!process.env.RESEND_API_KEY)throw new Error('RESEND_API_KEY not set');if(!list.length)throw new Error('No recipient');
- await axios.post('https://api.resend.com/emails',{from:process.env.MAIL_FROM,to:list,subject,html,text:toText(html),...(opts.replyTo?{reply_to:opts.replyTo}:{})},{headers:{Authorization:'Bearer '+process.env.RESEND_API_KEY}});n.status='sent'}
+ await axios.post('https://api.resend.com/emails',{from:process.env.MAIL_FROM,to:list,subject,html,text:toText(html),...(opts.replyTo?{reply_to:opts.replyTo}:{}),...(opts.attachments&&opts.attachments.length?{attachments:opts.attachments}:{})},{headers:{Authorization:'Bearer '+process.env.RESEND_API_KEY}});n.status='sent'}
  catch(e){if(n){n.status='failed';n.error=String(e.response?.data?.message||e.message)}}
  try{n&&await n.save()}catch{}return n?n.status:'failed'};

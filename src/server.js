@@ -10,7 +10,8 @@ app.use(helmet());app.use(compression());app.use(require('./cors'));app.use(cook
 app.post('/api/payments/webhook',express.raw({type:'application/json'}),wrap(async(q,s)=>{
  if(!bill.validSignature(q.body,q.headers['x-paystack-signature']))return s.sendStatus(401);
  const e=JSON.parse(q.body);await extra.webhook(e);s.sendStatus(200)}));
-app.get('/api/whatsapp/webhook',extra3.waVerify);app.post('/api/whatsapp/webhook',express.raw({type:'application/json'}),extra3.waEvents);
+const wa=require('./whatsapp/routes');// one Meta app serves every hotel's number: messages are routed to the right hotel by phone_number_id
+app.get('/api/whatsapp/webhook',wa.verify);app.post('/api/whatsapp/webhook',express.raw({type:'application/json',limit:'2mb'}),wa.events);
 app.use(express.json({limit:'100kb'}));app.use('/api',(q,s,n)=>q.method==='GET'||q.get('x-requested-with')==='keykonnec'?n():s.status(403).json({error:'Blocked request'}));app.use('/api',(q,s,n)=>{s.set('Cache-Control','private, no-cache');n()});// authenticated and tenant data is never shared-cacheable; public routes opt in below
 app.use('/api',rate({windowMs:60000,limit:120}),api);
 const seedPlans=require('./plans').seed;
@@ -79,7 +80,7 @@ api.get('/public/booking/:ref',wrap(async(q,s)=>{const r=await D.Reservation.fin
 api.get('/admin/plans',...admin,wrap(async(q,s)=>s.json(await D.Plan.find())));
 api.patch('/admin/plans/:id',...admin,wrap(async(q,s)=>s.json(await D.Plan.findByIdAndUpdate(q.params.id,parse(z.object({price:z.number().min(0),commissionRate:z.number().min(0).max(1),rooms:z.number(),branches:z.number(),staff:z.number(),monthlyBookings:z.number(),trialDays:z.number().int().min(0).max(90),features:z.array(z.string())}).partial(),q.body),{new:true}))));
 api.get('/admin/commissions',...admin,wrap(async(q,s)=>s.json(await D.Commission.find().sort({createdAt:-1}).limit(100))));
-const ctx={api,auth,need,admin,audit,parse,wrap};extra5.mount(ctx);extra4.mount(ctx);extra3.mount(ctx);extra.mount(ctx);extra2.mount(ctx);extra.jobs();extra2.jobs();extra3.jobs();
+const ctx={api,auth,need,admin,audit,parse,wrap};extra5.mount(ctx);extra4.mount(ctx);extra3.mount(ctx);extra.mount(ctx);extra2.mount(ctx);wa.mount(ctx);extra.jobs();extra2.jobs();extra3.jobs();wa.jobs();
 app.use((e,q,s,n)=>{if(e.name==='ZodError')return s.status(400).json({error:'Invalid input',details:e.issues});if(e.status&&e.status<500)return s.status(e.status).json({error:e.message});console.error(e);s.status(500).json({error:'Something went wrong'})});
 // ---- jobs: expire holds each minute; 
 cron.schedule('* * * * *',()=>inv.expireHolds().catch(console.error));require('./domainService').start();// background checks for custom domains that are waiting for DNS, verification or SSL

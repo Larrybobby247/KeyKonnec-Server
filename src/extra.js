@@ -30,8 +30,8 @@ exports.initialSub=async(hotel,key)=>{const now=new Date(),f=await D.Plan.findOn
  return D.Subscription.create({hotel,plan:'free',status:'active',pendingPlan:pp?pp.key:undefined,commissionRate:f.commissionRate,history:[{plan:'free',rate:f.commissionRate,at:now}]})};
 exports.applyRefund=applyRefund;exports.sendVerify=sendVerify;
 exports.webhook=async e=>{const d=e.data||{};
- if(e.event==='charge.success')return String(d.reference).startsWith('SUB-')?settleSub(d.reference,d):bill.settle(d.reference,d);
- if(e.event==='refund.processed'){const p=await D.Payment.findOneAndUpdate({reference:d.transaction_reference,refundStatus:'pending'},{refundStatus:'refunded'});if(p){await applyRefund(p,d.amount/100);const r=await D.Reservation.findById(p.reservation);if(r&&r.guest.email){const m=E.guestRefund({hotel:await D.Hotel.findById(r.hotel).lean(),r,amount:d.amount/100});mail.send(r.guest.email,m.subject,m.html,r.hotel)}}}
+ if(e.event==='charge.success')return String(d.reference).startsWith('SUB-')?settleSub(d.reference,d):String(d.reference).startsWith('WAC-')?require('./whatsapp/credits').creditPurchase(d.reference,d):bill.settle(d.reference,d);
+ if(e.event==='refund.processed'){const p=await D.Payment.findOneAndUpdate({reference:d.transaction_reference,refundStatus:'pending'},{refundStatus:'refunded'});if(p){await applyRefund(p,d.amount/100);const r=await D.Reservation.findById(p.reservation);if(r&&r.guest.email){const m=E.guestRefund({hotel:await D.Hotel.findById(r.hotel).lean(),r,amount:d.amount/100});mail.send(r.guest.email,m.subject,m.html,r.hotel)}if(r)hooks.emit(r.hotel,'refund.processed',{reference:r.reference,amount:d.amount/100,refundReference:String(d.id||d.refund_reference||d.transaction_reference||'')})}}
  if(e.event==='refund.failed')await D.Payment.updateOne({reference:d.transaction_reference,refundStatus:'pending'},{refundStatus:'failed'})};
 exports.mount=({api,auth,need,admin,audit,parse,wrap})=>{
  const mb=q=>q.user.memberships[0].branches.map(String),can=(q,b)=>mb(q).includes(String(b)),feat=async(q,f)=>(await bill.entitlements(q.hotelId)).plan.features.includes(f);
@@ -122,7 +122,7 @@ exports.mount=({api,auth,need,admin,audit,parse,wrap})=>{
  api.get('/reports/analytics',auth,need('owner','manager','accountant'),wrap(async(q,s)=>{if(!await feat(q,'reports_plus'))return deny(s,'enhanced reports');
   const [x]=await D.Reservation.aggregate([{$match:{hotel:OID(q.hotelId)}},{$facet:{
    byType:[{$match:{status:{$ne:'cancelled'}}},{$group:{_id:'$roomType',revenue:{$sum:'$paid'},bookings:{$sum:1}}}],
-   bySource:[{$group:{_id:'$source',bookings:{$sum:1},revenue:{$sum:'$paid'}}}],
+   bySource:[{$group:{_id:{$ifNull:['$channel','$source']},bookings:{$sum:1},revenue:{$sum:'$paid'}}}],
    byBranch:[{$group:{_id:'$branch',bookings:{$sum:1},revenue:{$sum:'$paid'}}}],
    totals:[{$group:{_id:null,n:{$sum:1},cancelled:{$sum:{$cond:[{$eq:['$status','cancelled']},1,0]}},value:{$sum:'$total'},nights:{$sum:{$divide:[{$subtract:['$checkOut','$checkIn']},864e5]}}}}]}}]);
   const [ts,bs]=await Promise.all([D.RoomType.find({hotel:q.hotelId}),D.Branch.find({hotel:q.hotelId})]),nm=(l,id)=>(l.find(a=>String(a._id)===String(id))||{}).name||'Unknown',t=x.totals[0]||{n:0,cancelled:0,value:0,nights:0};

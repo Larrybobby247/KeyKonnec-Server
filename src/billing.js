@@ -29,7 +29,7 @@ exports.isFailure=d=>['failed','reversed'].includes(String(d.status));
 exports.settle=async(ref,d)=>{const p=await Payment.findOneAndUpdate({reference:ref,status:{$in:['pending','flagged','failed']}},{status:'processing'});if(!p)return;
  try{await settleOne(p,d)}catch(e){await Payment.updateOne({_id:p._id,status:'processing'},{status:p.status});throw e}};
 async function settleOne(p,d){
- if(d.status!=='success'){await Payment.updateOne({_id:p._id},{status:exports.isFailure(d)?'failed':p.status==='failed'?'failed':'pending'});return}
+ if(d.status!=='success'){await Payment.updateOne({_id:p._id},{status:exports.isFailure(d)?'failed':p.status==='failed'?'failed':'pending'});if(exports.isFailure(d)&&p.status!=='failed')hooks.emit(p.hotel,'payment.failed',{paymentReference:p.reference,reservationId:String(p.reservation)});return}
  if(!exports.amountMatches(d,p.amount)||!exports.currencyMatches(d,p.currency)){await Payment.updateOne({_id:p._id},{status:'flagged',flagReason:exports.mismatchReason(d,p.amount,p.currency)});return}
  const r=await Reservation.findById(p.reservation);
  if(p.kind==='balance'){const paid=r.paid+p.amount;await Reservation.updateOne({_id:r._id},{paid,paymentStatus:paid>=r.total?'paid':'partial'});await Payment.updateOne({_id:p._id},{status:'success',verified:true,flagReason:null});await recordCommission(r,p);hooks.emit(r.hotel,'payment.succeeded',{reservation:r.reference,amount:p.amount});require('./alerts').balancePaid(r,p,paid);return}

@@ -13,9 +13,10 @@ const cost=(r,paidNow)=>{const c=r.currency,paid=paidNow==null?r.paid:paidNow,ba
 const where=h=>[h.address&&['Address',h.address],h.phone&&['Phone',h.phone]].filter(Boolean);
 exports.money=money;exports.D=D;
 // Guest: payment received, booking confirmed.
-exports.guestConfirmed=({hotel:h,r,type:t,payment:p,paid})=>{const bal=Math.max(0,r.total-(paid==null?r.paid:paid));
+exports.guestConfirmed=({hotel:h,r,type:t,payment:p,paid,receiptUrl})=>{const bal=Math.max(0,r.total-(paid==null?r.paid:paid));
  return{subject:`Booking confirmed at ${h.name} · ${r.reference}`,html:mail.tpl('Your booking is confirmed',[`Hi ${first(r.guest.name)},`,`Thank you for booking with ${h.name}. We have received your payment${p?` of ${money(p.amount,r.currency)}`:''} and your room is reserved.`,
-  {heading:'Your stay'},...stay(r,t,h),{heading:'Payment summary'},...cost(r,paid),
+  {heading:'Your stay'},...stay(r,t,h),{heading:'Payment summary'},...cost(r,paid),p&&p.reference&&['Payment reference',p.reference],
+  receiptUrl&&{button:['Download your payment receipt',receiptUrl],accent:true},
   bal>0&&{note:`A balance of ${money(bal,r.currency)} is due ${r.balanceDue?'by '+D(r.balanceDue):'on arrival'}. You can pay it online any time from your booking page.`},
   {button:['View or manage your booking',manageUrl(r)]},
   {heading:'Hotel details'},...where(h),h.policies&&h.policies.cancellation&&['Cancellation',h.policies.cancellation],

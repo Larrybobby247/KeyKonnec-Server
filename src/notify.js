@@ -9,4 +9,4 @@ exports.whatsapp=async({hotel,to,template,params})=>{const n=phone(to);if(!n||!e
  catch(e){if(rec){rec.status='failed';rec.error=String(e.response?.data?.error?.message||e.message)}}
  try{rec&&await rec.save()}catch{}return rec?rec.status:'failed'};
 // Only hotels whose plan includes WhatsApp send guest messages. Never throws.
-exports.guest=async(r,template,params)=>{try{if((await require('./billing').entitlements(r.hotel)).plan.features.includes('whatsapp'))return await exports.whatsapp({hotel:r.hotel,to:r.guest.phone,template,params})}catch{}};
+exports.guest=async(r,template,params)=>{try{if(r.channel==='whatsapp_auto')return;if((await require('./billing').entitlements(r.hotel)).plan.features.includes('whatsapp'))return await exports.whatsapp({hotel:r.hotel,to:r.guest.phone,template,params})}catch{}};

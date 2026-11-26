@@ -1,4 +1,4 @@
-const D=require('./models'),inv=require('./inventory'),bill=require('./billing'),mail=require('./mail'),hooks=require('./hooks'),pricing=require('./pricing'),pdf=require('./pdf'),notify=require('./notify'),base=require('./extra'),alerts=require('./alerts'),E=require('./emails');
+const bookings=require('./bookingService'),D=require('./models'),inv=require('./inventory'),bill=require('./billing'),mail=require('./mail'),hooks=require('./hooks'),pricing=require('./pricing'),pdf=require('./pdf'),notify=require('./notify'),base=require('./extra'),alerts=require('./alerts'),E=require('./emails');
 const {z}=require('zod'),crypto=require('crypto'),dns=require('dns').promises,cron=require('node-cron'),rate=require('express-rate-limit'),mongoose=require('mongoose');
 const OID=x=>new mongoose.Types.ObjectId(String(x)),day=x=>new Date(x).toISOString().slice(0,10),sha=x=>crypto.createHash('sha256').update(String(x)).digest('hex'),hex=n=>crypto.randomBytes(n).toString('hex');
 const wa=(phone,text)=>{let p=String(phone||'').replace(/\D/g,'');if(p.startsWith('0'))p='234'+p.slice(1);return `https://wa.me/${p}?text=${encodeURIComponent(text)}`};
@@ -18,6 +18,7 @@ const statementRows=async(hotel,month)=>{const [y,m]=month.split('-').map(Number
  return rows.concat(free.filter(r=>!cs.some(c=>c.reservation&&String(c.reservation._id)===String(r._id))).map(r=>({ref:r.reference,date:day(r.createdAt),base:r.accommodation,rate:0,amount:0,status:'no commission'})))};
 exports.doRefund=doRefund;
 const rcx=async r=>({type:await D.RoomType.findById(r.roomType).lean(),rooms:await D.Room.find({_id:{$in:r.assignedRooms||[]}}).select('number').sort({number:1}).lean()});
+exports.rcx=rcx;
 exports.mount=({api,auth,need,admin,audit,parse,wrap})=>{
  const mb=q=>q.user.memberships[0].branches.map(String),can=(q,b)=>mb(q).includes(String(b)),F=async q=>(await bill.entitlements(q.hotelId)).plan.features,feat=async(q,f)=>(await F(q)).includes(f);
  const deny=(s,f)=>s.status(402).json({error:`This is not included in your plan (${f}). Upgrade to use it.`});
@@ -32,37 +33,22 @@ exports.mount=({api,auth,need,admin,audit,parse,wrap})=>{
   const [types0,branches,promos]=await Promise.all([D.RoomType.find(f).select('-hotel'),D.Branch.find({hotel:h.id,status:'active'}).select('name address').lean(),P.includes('pricing')?D.Promo.find({hotel:h.id,public:true,active:true}):[]]);
   const sale=await D.Room.aggregate([{$match:{roomType:{$in:types0.map(t=>t._id)},active:true,status:{$nin:['maintenance','out_of_service','cleaning']}}},{$group:{_id:'$roomType',n:{$sum:1}}}]),types=types0.map(t=>({...t.toObject(),forSale:(sale.find(x=>String(x._id)===String(t._id))||{}).n||0}));
   s.json({site:(h.website&&h.website.published)||{},hotel:{slug:h.slug,name:h.name,phone:h.phone,address:h.address,policies:h.policies,taxPercent:h.taxPercent,online:P.includes('online_payments')&&!!h.payout&&!!h.payout.subaccountCode,logo:h.logo,gallery:h.gallery,deposit:P.includes('deposits')?h.depositPercent:100,whatsapp:P.includes('whatsapp'),widget:P.includes('widget')},types,branches:branches.filter(b=>types.some(t=>String(t.branch)===String(b._id))).length>1?branches.filter(b=>types.some(t=>String(t.branch)===String(b._id))):[],offers:promos.filter(live).map(p=>({code:p.code,label:p.label,type:p.type,value:p.value}))})}));
- api.get('/public/:slug/availability',pubH,wrap(async(q,s)=>{const {checkIn,checkOut}=parse(z.object({checkIn:z.coerce.date(),checkOut:z.coerce.date()}),q.query);if(checkOut<=checkIn)return s.status(400).json({error:'Check-out must be after check-in'});
-  const f={hotel:q.h.id,active:true};if(q.query.branch)f.branch=q.query.branch;
-  s.json(await Promise.all((await D.RoomType.find(f)).map(async t=>{const o={id:t.id,name:t.name,capacity:t.capacity,description:t.description,images:t.images,featured:t.featured};
-   try{const k=await pricing.quote({hotel:q.h,plan:q.ent.plan,type:t,checkIn,checkOut});return{...o,nights:k.nights,unitTotal:k.total,available:await inv.freeRooms(t._id,checkIn,checkOut)}}catch(e){if(e.status!==400)throw e;return{...o,available:0,restriction:e.message}}})))}));
+ api.get('/public/:slug/availability',pubH,wrap(async(q,s)=>{const {checkIn,checkOut}=parse(z.object({checkIn:z.coerce.date(),checkOut:z.coerce.date()}),q.query);
+  s.json(await bookings.listAvailability({h:q.h,ent:q.ent,checkIn,checkOut,branch:q.query.branch}))}));
  api.get('/public/:slug/quote',pubH,wrap(async(q,s)=>{const b=parse(z.object({roomType:z.string(),checkIn:z.coerce.date(),checkOut:z.coerce.date(),qty:z.coerce.number().int().min(1).max(5).default(1),promo:z.string().optional()}),q.query);
   const t=await D.RoomType.findOne({_id:b.roomType,hotel:q.h.id,active:true});if(!t)return s.sendStatus(404);const k=await pricing.quote({hotel:q.h,plan:q.ent.plan,type:t,...b});s.json({...k,left:await inv.freeRooms(t._id,b.checkIn,b.checkOut)})}));
  api.post('/public/:slug/book',pubH,rate({windowMs:60000,limit:10}),wrap(async(q,s)=>{
   const b=parse(z.object({roomType:z.string(),checkIn:z.coerce.date(),checkOut:z.coerce.date(),adults:z.number().int().min(1),qty:z.number().int().min(1).max(5).default(1),promo:z.string().optional(),recover:z.string().optional(),marketingConsent:z.boolean().default(false),guest:z.object({name:z.string().min(2),email:z.string().email(),phone:z.string().min(7)})}),q.body);
-  const t=await D.RoomType.findOne({_id:b.roomType,hotel:q.h.id,active:true});if(!t||b.checkIn<new Date(Date.now()-864e5))return s.status(400).json({error:'Invalid request'});
-  if(b.adults>t.capacity*b.qty)return s.status(400).json({error:'Too many guests for this room'});
-  const {plan,sub}=q.ent,online=plan.features.includes('online_payments')&&!!q.h.payout&&!!q.h.payout.subaccountCode;
-  if(plan.monthlyBookings){const m=new Date();m.setUTCDate(1);m.setUTCHours(0,0,0,0);if(await D.Reservation.countDocuments({hotel:q.h.id,createdAt:{$gte:m}})>=plan.monthlyBookings)return s.status(402).json({error:'This hotel is not accepting new online bookings right now. Please contact the hotel.'})}
-  const k=await pricing.quote({hotel:q.h,plan,type:t,checkIn:b.checkIn,checkOut:b.checkOut,qty:b.qty,promo:b.promo});
-  try{await inv.reserve(t._id,b.checkIn,b.checkOut,b.qty)}catch(e){return e.message==='SOLD_OUT'?s.status(409).json({error:'Sorry, that room was just taken. Try other dates or another room.'}):Promise.reject(e)}
-  if(k.promoId&&!await D.Promo.findOneAndUpdate({_id:k.promoId,$expr:{$or:[{$not:['$maxUses']},{$lt:['$used','$maxUses']}]}},{$inc:{used:1}})){await inv.release(t._id,inv.nightsOf(b.checkIn,b.checkOut),b.qty);return s.status(409).json({error:'That code has just run out'})}
-  const ref='KK-'+hex(4).toUpperCase(),token=hex(24);
-  const r=await D.Reservation.create({hotel:q.h.id,branch:t.branch,roomType:t.id,guest:b.guest,checkIn:b.checkIn,checkOut:b.checkOut,adults:b.adults,qty:b.qty,accommodation:k.accommodation,discount:k.discount,promoCode:k.promoCode,tax:k.tax,total:k.total,deposit:k.deposit,balanceDue:k.dueDate,currency:q.h.currency,reference:ref,manageToken:token,commissionRate:sub.status==='trialing'?0:(plan.commissionRate||0),marketingConsent:b.marketingConsent,status:online?'pending':'requested'});
-  if(b.recover)await D.Enquiry.updateOne({token:b.recover,hotel:q.h.id},{status:'converted',reservation:r.id});hooks.emit(q.h.id,'reservation.created',{reference:ref});
-  const hold={hotel:q.h.id,branch:t.branch,roomType:t.id,checkIn:b.checkIn,checkOut:b.checkOut,qty:b.qty,reservation:r.id};
-  if(!online){await D.Hold.create({...hold,expiresAt:new Date('2999-01-01'),status:'converted'});alerts.bookingRequest(r);
-   return s.status(201).json({reference:ref,token,status:'requested',message:'Booking request sent. The hotel will contact you with payment instructions. No payment has been taken.'})}
-  await D.Hold.create({...hold,expiresAt:new Date(Date.now()+q.h.holdMinutes*6e4)});const pr='PAY-'+hex(8);
-  const charge=r2((r.commissionRate||0)*k.accommodation*(k.deposit/k.total)),sa=q.h.payout.subaccountCode,init=await bill.initialize(b.guest.email,k.deposit,pr,`${process.env.CLIENT_URL}/booking/${ref}?token=${token}`,{subaccount:sa,charge});
-  await D.Payment.create({hotel:q.h.id,branch:t.branch,reservation:r.id,amount:k.deposit,currency:q.h.currency,source:'platform',method:'paystack',reference:pr,commission:charge,subaccount:sa});
-  s.status(201).json({reference:ref,token,status:'pending',checkoutUrl:init.authorization_url})}));
+  // the booking itself (pricing, inventory, hold, Paystack checkout) lives in bookingService.js, shared with WhatsApp
+  const out=await bookings.createBooking({h:q.h,ent:q.ent,b});
+  if(out.status==='requested')return s.status(201).json({reference:out.reference,token:out.token,status:'requested',message:out.message});
+  s.status(201).json({reference:out.reference,token:out.token,status:'pending',checkoutUrl:out.checkoutUrl})}));
  api.post('/public/booking/:ref/pay-balance',rate({windowMs:60000,limit:10}),wrap(async(q,s)=>{const r=await D.Reservation.findOne({reference:q.params.ref,manageToken:String(q.query.token)});
   if(!r||!['confirmed','checked_in'].includes(r.status)||r.paid>=r.total||!r.guest.email)return s.status(409).json({error:'There is no balance to pay online'});
   const hh=await D.Hotel.findById(r.hotel);if(!(await bill.entitlements(r.hotel)).plan.features.includes('online_payments')||!hh.payout||!hh.payout.subaccountCode)return s.status(409).json({error:'Online payment is not available. Please pay the hotel directly.'});
   const amount=r.total-r.paid,ref='BAL-'+hex(8),charge=r2((r.commissionRate||0)*r.accommodation*(amount/r.total)),sa=hh.payout.subaccountCode,init=await bill.initialize(r.guest.email,amount,ref,`${process.env.CLIENT_URL}/booking/${r.reference}?token=${r.manageToken}`,{subaccount:sa,charge});
   await D.Payment.create({hotel:r.hotel,branch:r.branch,reservation:r._id,amount,currency:r.currency,source:'platform',method:'paystack',reference:ref,kind:'balance',commission:charge,subaccount:sa});s.json({checkoutUrl:init.authorization_url})}));
- api.get('/public/booking/:ref/receipt',wrap(async(q,s)=>{const r=await D.Reservation.findOne({reference:q.params.ref,manageToken:String(q.query.token)});if(!r)return s.sendStatus(404);
+ api.get('/public/booking/:ref/receipt',rate({windowMs:60000,limit:20}),wrap(async(q,s)=>{const r=await D.Reservation.findOne({reference:q.params.ref,manageToken:String(q.query.token)});if(!r)return s.sendStatus(404);
   const p=await D.Payment.findOne({reservation:r._id,status:'success'}).sort({createdAt:-1});if(!p)return s.status(404).json({error:'No payment yet'});pdf.receipt(s,{hotel:await D.Hotel.findById(r.hotel),r,p,...await rcx(r)})}));
  api.post('/public/:slug/enquiry',pubH,rate({windowMs:60000,limit:10}),wrap(async(q,s)=>{if(!q.ent.plan.features.includes('whatsapp'))return s.sendStatus(404);
   const b=parse(z.object({name:z.string().min(2),phone:z.string().min(7),email:z.string().email().optional().or(z.literal('')),roomType:z.string().optional(),checkIn:z.coerce.date().optional(),checkOut:z.coerce.date().optional(),consent:z.boolean().default(false)}),q.body);

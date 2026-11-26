@@ -11,6 +11,8 @@ async function deliver(d){const w=await Webhook.findById(d.webhook);if(!w||!w.ac
  await Webhook.updateOne({_id:w._id},ok?{failures:0}:done?{$inc:{failures:1}}:{});
  if(!ok&&done&&w.failures+1>=5)await Webhook.updateOne({_id:w._id},{active:false})}
 // The same body (with a stable event id) is re-sent on retry, so receivers can de-duplicate.
-exports.emit=(hotel,event,data)=>{(async()=>{for(const w of await Webhook.find({hotel,active:true,events:event})){
+// In-process listeners (the WhatsApp notifications subscribe here). A listener can never break the event or the caller.
+const LISTENERS=[];exports.on=f=>LISTENERS.push(f);
+exports.emit=(hotel,event,data)=>{for(const f of LISTENERS){try{Promise.resolve(f(hotel,event,data)).catch(e=>console.error('hook listener:',e.message))}catch(e){console.error('hook listener:',e.message)}}(async()=>{for(const w of await Webhook.find({hotel,active:true,events:event})){
  const d=await Delivery.create({hotel,webhook:w._id,event,status:'pending',attempts:0,nextAttempt:new Date(),body:JSON.stringify({event,id:crypto.randomUUID(),created:new Date(),data})});await deliver(d)}})().catch(()=>{})};
 exports.retry=async()=>{for(const d of await Delivery.find({status:{$in:['pending','retrying']},nextAttempt:{$lte:new Date()}}).limit(100))await deliver(d)};

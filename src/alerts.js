@@ -16,7 +16,7 @@ const notifyNew=async(r,mode,p)=>{const [{hotel:h,to},t]=await Promise.all([reci
  const {subject,html}=E.ownerBooking({hotel:h,r,type:t,mode,payment:p});if(to.length)await mail.send(to,subject,html,h._id,{replyTo:okEmail(r.guest.email)?r.guest.email:undefined})};
 // Online payment confirmed the booking: email the guest their confirmation and alert the hotel.
 exports.bookingPaid=guard(async(r,p)=>{const [h,t]=await Promise.all([D.Hotel.findById(r.hotel).lean(),D.RoomType.findById(r.roomType).lean()]);
- if(r.guest&&okEmail(r.guest.email)){const {subject,html}=E.guestConfirmed({hotel:h,r,type:t,payment:p});mail.send(r.guest.email,subject,html,r.hotel,{replyTo:(await recipients(r.hotel)).to[0]})}
+ if(r.guest&&okEmail(r.guest.email)&&r.channel!=='whatsapp_auto'){const {subject,html}=E.guestConfirmed({hotel:h,r,type:t,payment:p});mail.send(r.guest.email,subject,html,r.hotel,{replyTo:(await recipients(r.hotel)).to[0]})}
  await notifyNew(r,'paid',p)});
 // A guest sent a request (hotel has no online payments): acknowledge to the guest and alert the hotel.
 exports.bookingRequest=guard(async r=>{const [h,t]=await Promise.all([D.Hotel.findById(r.hotel).lean(),D.RoomType.findById(r.roomType).lean()]);
