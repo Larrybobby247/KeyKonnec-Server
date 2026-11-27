@@ -20,7 +20,7 @@ async function applyModify(hotel,id,b,user){const r=await D.Reservation.findOne(
  if(r.guest.email){const [hh,tt]=await Promise.all([D.Hotel.findById(hotel).lean(),D.RoomType.findById(r.roomType).lean()]),m=E.guestModified({hotel:hh,r,type:tt,refunded});mail.send(r.guest.email,m.subject,m.html,hotel)}
  hooks.emit(hotel,'reservation.modified',{reference:r.reference});return{total:r.total,diff:r.total-old,refunded,owing:Math.max(0,r.total-r.paid)}}
 async function doCancel(hotel,id,user){const r=await D.Reservation.findOne({_id:id,hotel,status:{$in:['pending','confirmed','requested']}});if(!r)return 'This reservation cannot be cancelled';
- const h=await D.Hold.findOne({reservation:r._id,status:'converted'});if(h){await inv.release(r.roomType,inv.nightsOf(r.checkIn,r.checkOut),r.qty);h.status='released';await h.save()}
+ await require('./bookingService').releaseHold(r);
  r.status='cancelled';r.assignedRooms=[];await r.save();await D.Audit.create({user,hotel,action:'reservation.cancelled',entity:'Reservation',entityId:r._id});
  if(r.guest.email){const [hh,tt]=await Promise.all([D.Hotel.findById(hotel).lean(),D.RoomType.findById(r.roomType).lean()]),m=E.guestCancelled({hotel:hh,r,type:tt});mail.send(r.guest.email,m.subject,m.html,hotel)}hooks.emit(hotel,'reservation.cancelled',{reference:r.reference})}
 exports.requestApproval=async(q,action,payload)=>{const a=await D.Approval.create({hotel:q.hotelId,action,payload,requestedBy:q.user.id});await D.Audit.create({user:q.user.id,hotel:q.hotelId,action:'approval.requested',entity:'Approval',entityId:a._id,detail:{action}});tellOwner(q.hotelId,'An action needs your approval',[`Type: ${action}. Open Integrations in your dashboard to decide.`])};

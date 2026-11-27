@@ -43,6 +43,7 @@ exports.mount=({api,auth,need,admin,audit,parse,wrap})=>{
   const out=await bookings.createBooking({h:q.h,ent:q.ent,b});
   if(out.status==='requested')return s.status(201).json({reference:out.reference,token:out.token,status:'requested',message:out.message});
   s.status(201).json({reference:out.reference,token:out.token,status:'pending',checkoutUrl:out.checkoutUrl})}));
+ api.post('/public/booking/:ref/resume',rate({windowMs:60000,limit:10}),wrap(async(q,s)=>s.json(await bookings.resumePayment({reference:q.params.ref,token:q.query.token}))));
  api.post('/public/booking/:ref/pay-balance',rate({windowMs:60000,limit:10}),wrap(async(q,s)=>{const r=await D.Reservation.findOne({reference:q.params.ref,manageToken:String(q.query.token)});
   if(!r||!['confirmed','checked_in'].includes(r.status)||r.paid>=r.total||!r.guest.email)return s.status(409).json({error:'There is no balance to pay online'});
   const hh=await D.Hotel.findById(r.hotel);if(!(await bill.entitlements(r.hotel)).plan.features.includes('online_payments')||!hh.payout||!hh.payout.subaccountCode)return s.status(409).json({error:'Online payment is not available. Please pay the hotel directly.'});
@@ -183,6 +184,7 @@ exports.jobs=()=>{
  cron.schedule('*/5 * * * *',async()=>{const cache={};// lapsed online checkouts become 'expired'; Professional hotels also get a recovery lead
   for(const h of await D.Hold.find({status:'expired',reservation:{$ne:null},updatedAt:{$gt:new Date(Date.now()-2*864e5)}}).limit(200)){
    const r=await D.Reservation.findOneAndUpdate({_id:h.reservation,status:'pending',abandonLogged:{$ne:true}},{status:'expired',abandonLogged:true});if(!r)continue;
+   if(r.guest&&r.guest.email){const hh=await D.Hotel.findById(r.hotel).select('name').lean();mail.send(r.guest.email,`Finish your booking at ${hh?hh.name:'the hotel'}`,mail.tpl('Your booking is waiting',[`Hi ${String(r.guest.name||'').split(' ')[0]}, you did not finish paying for reservation ${r.reference}, so we released the room.`,'You can still complete it. We will check the room is still free when you continue, and keep the same price.',{button:['Complete my booking',`${process.env.CLIENT_URL}/booking/${r.reference}?token=${r.manageToken}`]}]),r.hotel)}
    const P=cache[r.hotel]||(cache[r.hotel]=(await bill.entitlements(r.hotel)).plan.features);
    if(P.includes('recovery')){await D.Enquiry.create({hotel:r.hotel,branch:r.branch,name:r.guest.name,phone:r.guest.phone,email:r.guest.email,roomType:r.roomType,checkIn:r.checkIn,checkOut:r.checkOut,source:'abandoned',consent:!!r.marketingConsent,token:hex(12)});tellOwner(r.hotel,'A guest did not finish booking',[`${r.guest.name}, ${day(r.checkIn)} to ${day(r.checkOut)}`,'See Enquiries to follow up.'])}}});
  cron.schedule('0 * * * *',async()=>{const now=new Date(),free=await D.Plan.findOne({key:'free'});

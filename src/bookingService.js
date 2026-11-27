@@ -53,8 +53,55 @@ exports.createBooking = async ({ h, ent, b, channel }) => {
 exports.cancelUnpaid = async (reservationId, hotel) => {
   const r = await D.Reservation.findOneAndUpdate({ _id: reservationId, hotel, status: { $in: ['pending', 'requested'] }, paid: 0 }, { status: 'cancelled' }, { new: true });
   if (!r) return null;
-  const h = await D.Hold.findOneAndUpdate({ reservation: r._id, status: { $in: ['active', 'converted'] } }, { status: 'released' });
-  if (h) await inv.release(r.roomType, inv.nightsOf(r.checkIn, r.checkOut), r.qty);
+  await exports.releaseHold(r);
   hooks.emit(hotel, 'reservation.cancelled', { reference: r.reference });
   return r;
+};
+
+// Gives the rooms of a cancelled or no-show reservation back to the public booking page straight away.
+// A paid booking holds its rooms under a 'converted' hold; an unpaid checkout holds them under an 'active' one (until it times out).
+// The hold is claimed atomically, so the rooms are released exactly once even if the timeout job runs at the same moment.
+exports.releaseHold = async (r) => {
+  const h = await D.Hold.findOneAndUpdate({ reservation: r._id, status: { $in: ['active', 'converted'] } }, { status: 'released' });
+  if (h) await inv.release(r.roomType, inv.nightsOf(r.checkIn, r.checkOut), r.qty);
+  return !!h;
+};
+
+// A guest who did not finish paying can come back later and pay for the SAME booking at the SAME price.
+// Allowed for a pending checkout, or one that lapsed (status 'expired'), while nothing was paid, the hotel has not cancelled it, the dates are
+// still ahead and the room can still be had. Rooms are taken again through the normal inventory check, so a room someone else booked meanwhile is never double sold.
+exports.resumePayment = async ({ reference, token }) => {
+  const r = await D.Reservation.findOne({ reference, manageToken: String(token) });
+  if (!r) throw fail(404, 'Booking not found');
+  if (!['pending', 'expired'].includes(r.status) || r.paid > 0) throw fail(409, r.status === 'cancelled' ? 'This booking was cancelled. Please make a new booking.' : 'There is nothing to pay for this booking.');
+  if (!r.guest.email) throw fail(409, 'This booking has no email address for the payment.');
+  if (r.checkIn < new Date(Date.now() - 864e5)) throw fail(409, 'The dates of this booking have passed. Please make a new booking.');
+  const [h, ent] = await Promise.all([D.Hotel.findById(r.hotel), bill.entitlements(r.hotel)]);
+  if (!h || !exports.isOnline(h, ent)) throw fail(409, 'Online payment is not available. Please contact the hotel.');
+  const live = await D.Hold.findOne({ reservation: r._id, status: 'active', expiresAt: { $gt: new Date() } });
+  let holdExpires;
+  if (live) { holdExpires = new Date(Date.now() + h.holdMinutes * 6e4); await D.Hold.updateOne({ _id: live._id, status: 'active' }, { expiresAt: holdExpires }); }
+  else {
+    // only one of several simultaneous clicks may take the rooms again
+    const claim = await D.Reservation.findOneAndUpdate({ _id: r._id, status: { $in: ['pending', 'expired'] }, paid: 0, resumeLock: { $ne: true } }, { $set: { resumeLock: true } });
+    if (!claim) throw fail(409, 'Please wait a moment and try again.');
+    try {
+      try { await inv.reserve(r.roomType, r.checkIn, r.checkOut, r.qty); } catch (e) { throw e.message === 'SOLD_OUT' ? fail(409, 'Sorry, that room has been taken in the meantime. Please choose other dates or another room.') : e; }
+      holdExpires = new Date(Date.now() + h.holdMinutes * 6e4);
+      await D.Hold.updateMany({ reservation: r._id, status: 'expired' }, { status: 'superseded' });
+      await D.Hold.create({ hotel: r.hotel, branch: r.branch, roomType: r.roomType, checkIn: r.checkIn, checkOut: r.checkOut, qty: r.qty, reservation: r._id, expiresAt: holdExpires });
+      await D.Reservation.updateOne({ _id: r._id }, { status: 'pending', abandonLogged: false });
+    } finally { await D.Reservation.updateOne({ _id: r._id }, { $unset: { resumeLock: 1 } }); }
+  }
+  const amount = r.deposit > 0 ? r.deposit : r.total, ref = 'PAY-' + hex(8), charge = r2((r.commissionRate || 0) * r.accommodation * (amount / r.total)), sa = h.payout.subaccountCode;
+  const init = await bill.initialize(r.guest.email, amount, ref, `${process.env.CLIENT_URL}/booking/${r.reference}?token=${r.manageToken}`, { subaccount: sa, charge });
+  await D.Payment.create({ hotel: r.hotel, branch: r.branch, reservation: r._id, amount, currency: r.currency, source: 'platform', method: 'paystack', reference: ref, commission: charge, subaccount: sa });
+  return { checkoutUrl: init.authorization_url, holdExpiresAt: holdExpires };
+};
+
+// For the booking page: can this guest still pay for it?
+exports.canResume = async (r) => {
+  if (!['pending', 'expired'].includes(r.status) || r.paid > 0 || !r.guest.email || r.checkIn < new Date(Date.now() - 864e5)) return false;
+  const [h, ent] = await Promise.all([D.Hotel.findById(r.hotel), bill.entitlements(r.hotel)]);
+  return !!h && exports.isOnline(h, ent);
 };
